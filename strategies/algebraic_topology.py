@@ -137,7 +137,7 @@ class AlgebraicTopologyStrategy:
                     ["PX_LAST"],
                     start_date,
                     end_date,
-                    timeout_ms=60000,
+                    timeout_ms=30000,
                 )
                 all_data.update(batch_data)
             except Exception as e:
