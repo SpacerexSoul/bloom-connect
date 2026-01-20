@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Limits
     max_securities: int = Field(default=200, description="Maximum securities per request")
     max_fields: int = Field(default=200, description="Maximum fields per request")
-    max_timeout_ms: int = Field(default=30000, description="Maximum timeout in milliseconds")
+    max_timeout_ms: int = Field(default=120000, description="Maximum timeout in milliseconds")
 
     # Allowed services and request types
     allowed_services: list[str] = Field(
