@@ -171,41 +171,66 @@ class BloombergExecutor:
                     ))
                     continue
 
-                # Extract security data
+                # Extract security data (handles both Reference and Historical)
                 msg_data = extract_security_data(msg)
-                data.update(msg_data)
+                
+                # Merge data - for historical data, same security can come in multiple messages
+                for sec, fields in msg_data.items():
+                    if sec in data:
+                        # Merge field data (extend lists for historical data)
+                        for field, value in fields.items():
+                            if field in data[sec] and isinstance(value, list) and isinstance(data[sec][field], list):
+                                data[sec][field].extend(value)
+                            else:
+                                data[sec][field] = value
+                    else:
+                        data[sec] = fields
 
-                # Check for per-security errors
+                # Check for per-security errors (ReferenceDataResponse style)
                 if msg.hasElement("securityData"):
                     security_data = msg.getElement("securityData")
-                    for i in range(security_data.numValues()):
-                        sec = security_data.getValueAsElement(i)
-                        if sec.hasElement("securityError"):
-                            sec_name = sec.getElementAsString("security")
-                            err = sec.getElement("securityError")
-                            errors.append(ErrorDetail(
-                                code="BLP_SECURITY_ERROR",
-                                message=err.getElementAsString("message"),
-                                security=sec_name,
-                            ))
-                        if sec.hasElement("fieldExceptions"):
-                            sec_name = sec.getElementAsString("security")
-                            field_exc = sec.getElement("fieldExceptions")
-                            for j in range(field_exc.numValues()):
-                                fe = field_exc.getValueAsElement(j)
-                                field_id = fe.getElementAsString("fieldId")
-                                err_info = fe.getElement("errorInfo")
-                                errors.append(ErrorDetail(
-                                    code="BLP_FIELD_ERROR",
-                                    message=err_info.getElementAsString("message"),
-                                    security=sec_name,
-                                    field=field_id,
-                                ))
+                    
+                    # Handle array (ReferenceDataResponse) vs single element (HistoricalDataResponse)
+                    if security_data.isArray():
+                        for i in range(security_data.numValues()):
+                            sec = security_data.getValueAsElement(i)
+                            self._check_security_errors(sec, errors)
+                    else:
+                        # Single security (HistoricalDataResponse)
+                        self._check_security_errors(security_data, errors)
 
             if event.eventType() == blpapi.Event.RESPONSE:
                 break
 
         return data, errors
+
+    def _check_security_errors(self, sec_element: Any, errors: list[ErrorDetail]) -> None:
+        """Check a security element for errors."""
+        try:
+            sec_name = sec_element.getElementAsString("security") if sec_element.hasElement("security") else "unknown"
+            
+            if sec_element.hasElement("securityError"):
+                err = sec_element.getElement("securityError")
+                errors.append(ErrorDetail(
+                    code="BLP_SECURITY_ERROR",
+                    message=err.getElementAsString("message"),
+                    security=sec_name,
+                ))
+            
+            if sec_element.hasElement("fieldExceptions"):
+                field_exc = sec_element.getElement("fieldExceptions")
+                for j in range(field_exc.numValues()):
+                    fe = field_exc.getValueAsElement(j)
+                    field_id = fe.getElementAsString("fieldId")
+                    err_info = fe.getElement("errorInfo")
+                    errors.append(ErrorDetail(
+                        code="BLP_FIELD_ERROR",
+                        message=err_info.getElementAsString("message"),
+                        security=sec_name,
+                        field=field_id,
+                    ))
+        except Exception:
+            pass
 
     def _cleanup(self) -> None:
         """Clean up session resources."""
