@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blpremote-server"
+version = "0.1.0"
+description = "Windows server for remote Bloomberg BLPAPI execution"
+readme = "../../README.md"
+license = "MIT"
+authors = [
+    { name = "Krishna Dattani" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.104",
+    "uvicorn[standard]>=0.24",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+]
+
+[project.optional-dependencies]
+bloomberg = ["blpapi"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "httpx>=0.25",
+]
+
+[project.scripts]
+blpremote-server = "blpremote_server.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/blpremote_server"]
