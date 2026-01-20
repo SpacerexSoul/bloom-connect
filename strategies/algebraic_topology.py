@@ -122,13 +122,21 @@ class AlgebraicTopologyStrategy:
         print(f"[2/4] Fetching historical data ({start_date.date()} to {end_date.date()})...")
         print(f"      This may take several minutes for {len(securities)} securities...")
 
+        # Format tickers: Bloomberg index members return 'AAPL UW' but BDH needs 'AAPL UW Equity'
+        formatted_securities = []
+        for sec in securities:
+            if "Equity" not in sec and "Index" not in sec:
+                formatted_securities.append(f"{sec} Equity")
+            else:
+                formatted_securities.append(sec)
+
         # Fetch in batches to avoid timeouts
         batch_size = 50
         all_data = {}
 
-        for i in range(0, len(securities), batch_size):
-            batch = securities[i:i + batch_size]
-            print(f"      Batch {i // batch_size + 1}/{(len(securities) + batch_size - 1) // batch_size}")
+        for i in range(0, len(formatted_securities), batch_size):
+            batch = formatted_securities[i:i + batch_size]
+            print(f"      Batch {i // batch_size + 1}/{(len(formatted_securities) + batch_size - 1) // batch_size}")
 
             try:
                 batch_data = bdh(
@@ -144,7 +152,7 @@ class AlgebraicTopologyStrategy:
                 print(f"      Warning: Batch failed - {e}")
 
         print(f"[3/4] Processing price data...")
-        market_data = self._process_price_data(all_data, securities)
+        market_data = self._process_price_data(all_data, formatted_securities)
 
         print(f"[4/4] Computing returns and correlation matrix...")
         market_data = self._compute_returns_and_correlation(market_data)

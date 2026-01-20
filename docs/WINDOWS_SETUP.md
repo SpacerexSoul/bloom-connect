@@ -33,6 +33,7 @@ cd bloom-connect
 
 ## Step 3: Create Virtual Environment
 
+### Option A: Standard venv (may have issues with bcrypt on university PCs)
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
@@ -43,13 +44,35 @@ python -m venv venv
 > Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 > ```
 
+### Option B: Conda (Recommended for university Windows PCs)
+
+If you encounter bcrypt/passlib installation errors with venv, use conda instead:
+
+```powershell
+# Create conda environment
+conda create -n bloomberg python=3.11
+conda activate bloomberg
+
+# Install dependencies
+pip install fastapi uvicorn pydantic pydantic-settings python-jose passlib bcrypt httpx
+```
+
 ---
 
 ## Step 4: Install Server Dependencies
 
 ```powershell
 cd packages\blpremote_server
+
+# Set PYTHONPATH (important!)
+$env:PYTHONPATH = "src"
+
 pip install -e .
+```
+
+**If `pip install -e .` fails**, install dependencies manually:
+```powershell
+pip install fastapi uvicorn pydantic pydantic-settings python-jose passlib bcrypt
 ```
 
 ---

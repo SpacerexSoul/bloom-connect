@@ -99,7 +99,7 @@ print(result.to_dict())
 
 ### Prerequisites
 
-1. **Python 3.10+** installed
+1. **Python 3.10+** installed (or Anaconda/Miniconda)
 2. **Bloomberg Terminal** installed and logged in
 3. **Bloomberg BLPAPI Python SDK** (`pip install blpapi`)
 
@@ -107,52 +107,47 @@ print(result.to_dict())
 
 ```powershell
 cd packages\blpremote_server
+
+# Option 1: Standard venv
 pip install -e .
 
-# Or with Bloomberg support
-pip install -e ".[bloomberg]"
+# Option 2: Conda (recommended for university PCs)
+conda create -n bloomberg python=3.11
+conda activate bloomberg
+pip install fastapi uvicorn pydantic pydantic-settings python-jose passlib bcrypt
 ```
 
-### Start the Server
+See [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) for detailed instructions.
 
-**PowerShell:**
+### University Networks (ngrok)
+
+If you can't configure the firewall (e.g., university PC), use ngrok:
+
 ```powershell
-.\scripts\run_server.ps1 -Host 0.0.0.0 -Port 8000
+# Terminal 1: Start server on localhost
+python -m uvicorn blpremote_server.app:app --host 127.0.0.1 --port 8000
+
+# Terminal 2: Start ngrok tunnel
+.\tools\ngrok http 8000
 ```
 
-**Command Prompt:**
-```cmd
-scripts\run_server.cmd --host 0.0.0.0 --port 8000
-```
+This gives you a public URL like `https://abc123.ngrok-free.app` that works from anywhere.
 
-**Or directly with Python:**
-```bash
+See [docs/NGROK_SETUP.md](docs/NGROK_SETUP.md) for full setup.
+
+### Direct Network Setup
+
+For direct network access:
+
+```powershell
+# Allow incoming connections (run as admin)
+New-NetFirewallRule -DisplayName "Bloomberg Remote" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+
+# Start server
 python -m uvicorn blpremote_server.app:app --host 0.0.0.0 --port 8000
 ```
 
-### Configure Firewall
-
-Allow inbound connections on port 8000:
-
-```powershell
-New-NetFirewallRule -DisplayName "Bloomberg Remote Server" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
-```
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BLPREMOTE_PORT` | 8000 | Server port |
-| `BLPREMOTE_SECRET_KEY` | (dev key) | JWT secret - **change in production** |
-| `BLPREMOTE_TOKEN_EXPIRE_MINUTES` | 60 | Token lifetime |
-| `BLPREMOTE_IP_ALLOWLIST` | (empty) | Comma-separated allowed IPs |
-
-### Recommended Network Setup
-
-- Use **static IP** or **DHCP reservation** for the Windows machine
-- Consider using a **reverse proxy** (nginx/Caddy) for TLS termination
-
-> ⚠️ **Security Warning**: Do not expose this server to the public internet without TLS and proper authentication. Use a reverse proxy with HTTPS for production deployments.
+> ⚠️ **Security Warning**: Do not expose this server to the public internet without TLS and proper authentication.
 
 ---
 
