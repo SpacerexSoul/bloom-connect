@@ -1,8 +1,9 @@
 """Pydantic models for server request/response handling."""
 
-from typing import Any, Literal, Optional, Union
-from pydantic import BaseModel, Field
 import uuid
+from typing import Any, Literal, Optional, Union
+
+from pydantic import BaseModel, Field
 
 
 # Operation types for the IR (same as client)

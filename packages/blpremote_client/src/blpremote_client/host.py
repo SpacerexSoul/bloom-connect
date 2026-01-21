@@ -11,7 +11,7 @@ from blpremote_client.exceptions import (
     ExecutionError,
     from_error_code,
 )
-from blpremote_client.models import ExecutionPlan, ExecutionResult, AuthToken
+from blpremote_client.models import AuthToken, ExecutionPlan, ExecutionResult
 
 
 class RemoteHost:

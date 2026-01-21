@@ -1,19 +1,19 @@
 """Extended Bloomberg data functions for historical and bulk data requests."""
 
-from typing import Any, Optional, Union
 from datetime import date, datetime
+from typing import Any, Optional, Union
 
 from blpremote_client.host import RemoteHost
 from blpremote_client.models import (
-    ExecutionPlan,
-    AuthToken,
-    StartSessionOp,
-    OpenServiceOp,
-    CreateRequestOp,
     AppendOp,
-    SetOp,
-    SendRequestOp,
+    AuthToken,
     CollectResponseOp,
+    CreateRequestOp,
+    ExecutionPlan,
+    OpenServiceOp,
+    SendRequestOp,
+    SetOp,
+    StartSessionOp,
 )
 
 

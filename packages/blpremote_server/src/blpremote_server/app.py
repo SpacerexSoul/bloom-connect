@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from blpremote_server import __version__
 from blpremote_server.auth import (
@@ -17,15 +17,14 @@ from blpremote_server.config import settings
 from blpremote_server.exceptions import ValidationError as PlanValidationError
 from blpremote_server.executor import execute_plan, validate_plan
 from blpremote_server.models import (
+    ErrorDetail,
     ExecutionPlan,
     ExecutionResult,
-    ErrorDetail,
     HealthResponse,
     LoginRequest,
     LoginResponse,
     VersionResponse,
 )
-
 
 app = FastAPI(
     title="Bloomberg Remote Server",
@@ -97,11 +96,9 @@ async def get_current_user(
 async def health_check() -> HealthResponse:
     """Check server health."""
     # Try to detect if Bloomberg is available
-    try:
-        import blpapi
-        bloomberg_available = True
-    except ImportError:
-        bloomberg_available = False
+    import importlib.util
+
+    bloomberg_available = importlib.util.find_spec("blpapi") is not None
 
     return HealthResponse(status="healthy", bloomberg_connected=bloomberg_available)
 
@@ -192,6 +189,7 @@ async def create_user(
 def main():
     """Run the server."""
     import uvicorn
+
     uvicorn.run(
         "blpremote_server.app:app",
         host=settings.host,

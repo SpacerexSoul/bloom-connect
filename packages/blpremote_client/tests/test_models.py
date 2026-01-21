@@ -1,17 +1,15 @@
 """Tests for client models and plan building."""
 
-import pytest
 from blpremote_client.models import (
-    ExecutionPlan,
-    AuthToken,
-    StartSessionOp,
-    OpenServiceOp,
-    CreateRequestOp,
     AppendOp,
-    SendRequestOp,
+    AuthToken,
     CollectResponseOp,
+    CreateRequestOp,
+    ExecutionPlan,
     ExecutionResult,
-    PlanLimits,
+    OpenServiceOp,
+    SendRequestOp,
+    StartSessionOp,
 )
 
 

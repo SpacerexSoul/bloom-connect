@@ -47,19 +47,23 @@ class Request:
 
     def _append(self, path: str, value: Union[str, int, float, bool]) -> None:
         """Internal: record an append operation."""
-        self._operations.append({
-            "type": "append",
-            "path": path,
-            "value": value,
-        })
+        self._operations.append(
+            {
+                "type": "append",
+                "path": path,
+                "value": value,
+            }
+        )
 
     def _set(self, path: str, value: Union[str, int, float, bool]) -> None:
         """Internal: record a set operation."""
-        self._operations.append({
-            "type": "set",
-            "path": path,
-            "value": value,
-        })
+        self._operations.append(
+            {
+                "type": "set",
+                "path": path,
+                "value": value,
+            }
+        )
 
     def _get_operations(self) -> list[dict[str, Any]]:
         """Get all recorded operations."""

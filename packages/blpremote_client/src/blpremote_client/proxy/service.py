@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from blpremote_client.proxy.request import Request
     from blpremote_client.proxy.session import Session
 
 
@@ -35,12 +36,14 @@ class Service:
         request_id = f"req{self._request_counter}"
 
         # Record the create_request operation in the session
-        self._session._add_op({
-            "op": "create_request",
-            "service": self._name,
-            "request": request_type,
-            "id": request_id,
-        })
+        self._session._add_op(
+            {
+                "op": "create_request",
+                "service": self._name,
+                "request": request_type,
+                "id": request_id,
+            }
+        )
 
         return Request(self, request_type, request_id)
 

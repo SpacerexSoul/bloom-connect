@@ -20,9 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run Algebraic Topology Market-Neutral Strategy"
-    )
+    parser = argparse.ArgumentParser(description="Run Algebraic Topology Market-Neutral Strategy")
     parser.add_argument(
         "--host",
         required=True,
@@ -50,6 +48,7 @@ def main():
     args = parser.parse_args()
 
     from blpremote_client import RemoteHost
+
     from strategies.algebraic_topology import AlgebraicTopologyStrategy, StrategyConfig
 
     print("=" * 70)

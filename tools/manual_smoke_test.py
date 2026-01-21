@@ -14,7 +14,9 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description="Manual smoke test for Bloomberg Remote")
-    parser.add_argument("--host", required=True, help="Windows server URL (e.g., http://192.168.1.100:8000)")
+    parser.add_argument(
+        "--host", required=True, help="Windows server URL (e.g., http://192.168.1.100:8000)"
+    )
     parser.add_argument("--username", required=True, help="Username for authentication")
     parser.add_argument("--password", required=True, help="Password for authentication")
     parser.add_argument("--security", default="IBM US Equity", help="Security to test")
@@ -55,7 +57,9 @@ def main():
         # Test 5: Proxy API
         print("\n[5/5] Testing proxy Session/Service/Request API...")
         opts = SessionOptions()
-        with Session(opts, remote_host=args.host, username=args.username, password=args.password) as session:
+        with Session(
+            opts, remote_host=args.host, username=args.username, password=args.password
+        ) as session:
             session.start()
             session.openService("//blp/refdata")
             svc = session.getService("//blp/refdata")
@@ -82,6 +86,7 @@ def main():
     except Exception as e:
         print(f"\n✗ Test failed: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 

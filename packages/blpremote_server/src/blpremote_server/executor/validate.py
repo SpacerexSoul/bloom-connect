@@ -1,15 +1,13 @@
 """Execution plan validation."""
 
-from typing import Any
-
 from blpremote_server.config import settings
 from blpremote_server.exceptions import ValidationError
 from blpremote_server.models import (
-    ExecutionPlan,
-    OpenServiceOp,
-    CreateRequestOp,
     AppendOp,
     CollectResponseOp,
+    CreateRequestOp,
+    ExecutionPlan,
+    OpenServiceOp,
 )
 
 
@@ -56,19 +54,13 @@ def validate_plan(plan: ExecutionPlan) -> None:
         elif isinstance(op, CollectResponseOp):
             max_timeout = min(plan.limits.max_timeout_ms, settings.max_timeout_ms)
             if op.timeout_ms > max_timeout:
-                raise ValidationError(
-                    f"Timeout {op.timeout_ms}ms exceeds maximum {max_timeout}ms"
-                )
+                raise ValidationError(f"Timeout {op.timeout_ms}ms exceeds maximum {max_timeout}ms")
 
     # Validate limits
     max_securities = min(plan.limits.max_securities, settings.max_securities)
     if security_count > max_securities:
-        raise ValidationError(
-            f"Too many securities ({security_count}). Maximum: {max_securities}"
-        )
+        raise ValidationError(f"Too many securities ({security_count}). Maximum: {max_securities}")
 
     max_fields = min(plan.limits.max_fields, settings.max_fields)
     if field_count > max_fields:
-        raise ValidationError(
-            f"Too many fields ({field_count}). Maximum: {max_fields}"
-        )
+        raise ValidationError(f"Too many fields ({field_count}). Maximum: {max_fields}")

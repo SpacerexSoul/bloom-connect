@@ -4,14 +4,14 @@ from typing import Any, Optional, Union
 
 from blpremote_client.host import RemoteHost
 from blpremote_client.models import (
-    ExecutionPlan,
-    AuthToken,
-    StartSessionOp,
-    OpenServiceOp,
-    CreateRequestOp,
     AppendOp,
-    SendRequestOp,
+    AuthToken,
     CollectResponseOp,
+    CreateRequestOp,
+    ExecutionPlan,
+    OpenServiceOp,
+    SendRequestOp,
+    StartSessionOp,
 )
 
 

@@ -1,18 +1,19 @@
 """Execution plan builder for accumulating IR operations."""
 
 from typing import Optional, Union
+
 from blpremote_client.models import (
-    ExecutionPlan,
-    AuthToken,
-    Op,
-    StartSessionOp,
-    OpenServiceOp,
-    CreateRequestOp,
     AppendOp,
-    SetOp,
-    SendRequestOp,
+    AuthToken,
     CollectResponseOp,
+    CreateRequestOp,
+    ExecutionPlan,
+    Op,
+    OpenServiceOp,
     PlanLimits,
+    SendRequestOp,
+    SetOp,
+    StartSessionOp,
 )
 
 
@@ -40,12 +41,12 @@ class PlanBuilder:
         """Add a create_request operation and return the request ID."""
         self._request_counter += 1
         req_id = f"req{self._request_counter}"
-        self._ops.append(
-            CreateRequestOp(service=service, request=request_type, id=req_id)
-        )
+        self._ops.append(CreateRequestOp(service=service, request=request_type, id=req_id))
         return req_id
 
-    def append(self, request_id: str, path: str, value: Union[str, int, float, bool]) -> "PlanBuilder":
+    def append(
+        self, request_id: str, path: str, value: Union[str, int, float, bool]
+    ) -> "PlanBuilder":
         """Add an append operation."""
         self._ops.append(AppendOp(id=request_id, path=path, value=value))
         return self
@@ -64,9 +65,7 @@ class PlanBuilder:
 
     def collect_response(self, correlation_id: str, timeout_ms: int = 10000) -> "PlanBuilder":
         """Add a collect_response operation."""
-        self._ops.append(
-            CollectResponseOp(correlation_id=correlation_id, timeout_ms=timeout_ms)
-        )
+        self._ops.append(CollectResponseOp(correlation_id=correlation_id, timeout_ms=timeout_ms))
         return self
 
     def set_limits(

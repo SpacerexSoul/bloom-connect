@@ -1,4 +1,3 @@
-"""
 """Trading Strategies for Bloomberg Remote Connector."""
 
 from strategies.algebraic_topology import AlgebraicTopologyStrategy

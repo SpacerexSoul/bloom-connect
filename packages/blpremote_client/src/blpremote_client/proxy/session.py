@@ -1,17 +1,16 @@
 """Bloomberg-like Session proxy that builds and executes IR plans."""
 
 from typing import Any, Optional
-import uuid
 
 from blpremote_client.host import RemoteHost
 from blpremote_client.models import (
+    AuthToken,
     ExecutionPlan,
     ExecutionResult,
-    AuthToken,
     PlanLimits,
 )
-from blpremote_client.proxy.service import Service
 from blpremote_client.proxy.request import Request
+from blpremote_client.proxy.service import Service
 
 
 class SessionOptions:
@@ -124,26 +123,32 @@ class Session:
         # Add all the request's accumulated operations
         for op in request._get_operations():
             if op["type"] == "append":
-                self._ops.append({
-                    "op": "append",
-                    "id": request._get_id(),
-                    "path": op["path"],
-                    "value": op["value"],
-                })
+                self._ops.append(
+                    {
+                        "op": "append",
+                        "id": request._get_id(),
+                        "path": op["path"],
+                        "value": op["value"],
+                    }
+                )
             elif op["type"] == "set":
-                self._ops.append({
-                    "op": "set",
-                    "id": request._get_id(),
-                    "path": op["path"],
-                    "value": op["value"],
-                })
+                self._ops.append(
+                    {
+                        "op": "set",
+                        "id": request._get_id(),
+                        "path": op["path"],
+                        "value": op["value"],
+                    }
+                )
 
         # Add send_request operation
-        self._ops.append({
-            "op": "send_request",
-            "id": request._get_id(),
-            "correlation_id": correlation_id,
-        })
+        self._ops.append(
+            {
+                "op": "send_request",
+                "id": request._get_id(),
+                "correlation_id": correlation_id,
+            }
+        )
 
         self._pending_requests[correlation_id] = request
         return correlation_id
@@ -162,11 +167,13 @@ class Session:
             raise ValueError(f"No pending request with correlation_id: {correlation_id}")
 
         # Add collect_response operation
-        self._ops.append({
-            "op": "collect_refdata_response",
-            "correlation_id": correlation_id,
-            "timeout_ms": timeout_ms,
-        })
+        self._ops.append(
+            {
+                "op": "collect_refdata_response",
+                "correlation_id": correlation_id,
+                "timeout_ms": timeout_ms,
+            }
+        )
 
         # Build and execute the plan
         token = self._remote._get_token()

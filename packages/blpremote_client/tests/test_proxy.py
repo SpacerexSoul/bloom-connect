@@ -1,11 +1,11 @@
 """Tests for the proxy API (Session, Service, Request)."""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
-from blpremote_client.proxy.session import Session, SessionOptions
+import pytest
+from blpremote_client.proxy.request import Element, Request
 from blpremote_client.proxy.service import Service
-from blpremote_client.proxy.request import Request, Element
+from blpremote_client.proxy.session import Session, SessionOptions
 
 
 class TestSessionOptions:

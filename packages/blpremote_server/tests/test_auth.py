@@ -1,14 +1,13 @@
 """Tests for server authentication."""
 
-import pytest
 from datetime import timedelta
 
 from blpremote_server.auth import (
+    UserStore,
+    create_access_token,
     hash_password,
     verify_password,
-    create_access_token,
     verify_token,
-    UserStore,
 )
 
 

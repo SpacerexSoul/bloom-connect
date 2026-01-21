@@ -1,18 +1,18 @@
 """Tests for server plan validation."""
 
 import pytest
-from blpremote_server.executor.validate import validate_plan
 from blpremote_server.exceptions import ValidationError
+from blpremote_server.executor.validate import validate_plan
 from blpremote_server.models import (
-    ExecutionPlan,
-    AuthToken,
-    StartSessionOp,
-    OpenServiceOp,
-    CreateRequestOp,
     AppendOp,
-    SendRequestOp,
+    AuthToken,
     CollectResponseOp,
+    CreateRequestOp,
+    ExecutionPlan,
+    OpenServiceOp,
     PlanLimits,
+    SendRequestOp,
+    StartSessionOp,
 )
 
 

@@ -73,7 +73,7 @@ def extract_security_data(message: Any) -> dict[str, dict[str, Any]]:
                 # HistoricalDataResponse - single security with time series
                 result = _extract_historical_data(security_data)
 
-    except Exception as e:
+    except Exception:
         # If parsing fails, try to at least return the error
         pass
 
@@ -196,12 +196,12 @@ def _extract_field_value(field: Any) -> Any:
             return field.getValueAsString()
         elif dtype == 12:  # DATETIME
             dt = field.getValueAsDatetime()
-            if hasattr(dt, 'strftime'):
+            if hasattr(dt, "strftime"):
                 return dt.strftime("%Y-%m-%d")
             return str(dt)
         elif dtype == 13:  # DATE
             dt = field.getValueAsDatetime()
-            if hasattr(dt, 'strftime'):
+            if hasattr(dt, "strftime"):
                 return dt.strftime("%Y-%m-%d")
             return str(dt)
         else:

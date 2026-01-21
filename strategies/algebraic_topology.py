@@ -26,13 +26,16 @@ Strategy Overview:
 """
 
 import sys
-from pathlib import Path
-from typing import Any, Optional
-from datetime import date, datetime, timedelta
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from blpremote_client import RemoteHost
 
 # Add parent path for imports when running standalone
 sys.path.insert(0, str(Path(__file__).parent.parent / "packages/blpremote_client/src"))
@@ -40,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "packages/blpremote_client
 
 class AlertLevel(Enum):
     """Alert severity levels."""
+
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
@@ -101,7 +105,7 @@ class StrategyConfig:
     # =========================================================================
     # ENTROPY REGIME THRESHOLDS (Calibrated)
     # =========================================================================
-    low_entropy_threshold: float = 1.0   # Clear regime
+    low_entropy_threshold: float = 1.0  # Clear regime
     high_entropy_threshold: float = 2.5  # Uncertain regime
 
     # =========================================================================
@@ -134,22 +138,23 @@ class StrategyConfig:
 @dataclass
 class StockData:
     """Complete data container for a single stock."""
+
     ticker: str
     bloomberg_ticker: str
     sector: str = ""
-    
+
     # Liquidity
     market_cap: float = 0.0
     avg_volume: float = 0.0
-    
+
     # Quality
     roe: float = 0.0
     debt_to_equity: float = 0.0
     net_income: float = 0.0
-    
+
     # Earnings
     days_to_earnings: Optional[int] = None
-    
+
     # Price data
     prices: list = field(default_factory=list)
     current_price: float = 0.0
@@ -159,6 +164,7 @@ class StockData:
 @dataclass
 class MarketData:
     """Container for market data."""
+
     securities: list[str] = field(default_factory=list)
     stock_data: dict[str, StockData] = field(default_factory=dict)
     prices: dict[str, np.ndarray] = field(default_factory=dict)
@@ -171,11 +177,12 @@ class MarketData:
 @dataclass
 class TopologicalFeatures:
     """Container for extracted topological features."""
+
     persistence_diagrams: dict[int, np.ndarray] = field(default_factory=dict)
     betti_numbers: list[int] = field(default_factory=list)
     persistence_entropy: float = 0.0
     regime_features: np.ndarray = field(default_factory=lambda: np.array([]))
-    
+
     # Additional features
     h1_cycles: int = 0  # Number of 1-dimensional holes
     total_persistence: float = 0.0
@@ -205,46 +212,42 @@ class AlgebraicTopologyStrategy:
         self._rolling_laplacian: Optional[np.ndarray] = None
         self.vix: float = 20.0
         self.alerts: list[tuple[AlertLevel, str]] = []
-        
+
         # Check for ripser
-        self._has_ripser = False
-        try:
-            import ripser
-            self._has_ripser = True
-        except ImportError:
-            pass
+        import importlib.util
+
+        self._has_ripser = importlib.util.find_spec("ripser") is not None
 
     # =========================================================================
     # DATA FETCHING WITH FILTERS
     # =========================================================================
-    
+
     def fetch_data(self, host: "RemoteHost") -> MarketData:
         """
         Fetch and filter data with liquidity/quality screens.
         """
+        from blpremote_client import px_last, ref_data
         from blpremote_client.data import bdh, get_index_members
-        from blpremote_client import ref_data, px_last
 
         print(f"[1/6] Fetching index members for {self.config.index}...")
         members = get_index_members(host, self.config.index, timeout_ms=30000)
         print(f"      Found {len(members)} members")
 
         # Format tickers
-        tickers = [f"{m} Equity" for m in members[:self.config.max_securities * 2]]
+        tickers = [f"{m} Equity" for m in members[: self.config.max_securities * 2]]
 
         # =====================================================================
         # FETCH VIX FIRST (for regime check)
         # =====================================================================
-        print(f"[2/6] Fetching VIX for regime check...")
+        print("[2/6] Fetching VIX for regime check...")
         try:
             self.vix = float(px_last(host, "VIX Index"))
             print(f"      VIX: {self.vix:.2f}")
-            
+
             if self.vix >= self.config.vix_stop_trading_threshold:
-                self.alerts.append((
-                    AlertLevel.CRITICAL,
-                    f"VIX ({self.vix:.1f}) above stop threshold - no trading"
-                ))
+                self.alerts.append(
+                    (AlertLevel.CRITICAL, f"VIX ({self.vix:.1f}) above stop threshold - no trading")
+                )
         except Exception as e:
             print(f"      Warning: Could not fetch VIX: {e}")
             self.vix = 20.0
@@ -252,8 +255,8 @@ class AlgebraicTopologyStrategy:
         # =====================================================================
         # FETCH REFERENCE DATA FOR FILTERING
         # =====================================================================
-        print(f"[3/6] Fetching reference data for filtering...")
-        
+        print("[3/6] Fetching reference data for filtering...")
+
         ref_fields = [
             "CUR_MKT_CAP",
             "VOLUME_AVG_20D",
@@ -263,19 +266,14 @@ class AlgebraicTopologyStrategy:
             "IS_NET_INCOME",
             "EXPECTED_REPORT_DT",
         ]
-        
+
         fund_data = {}
         batch_size = 30
-        
+
         for i in range(0, min(len(tickers), 150), batch_size):
-            batch = tickers[i:i + batch_size]
+            batch = tickers[i : i + batch_size]
             try:
-                batch_data = ref_data(
-                    host,
-                    securities=batch,
-                    fields=ref_fields,
-                    timeout_ms=30000
-                )
+                batch_data = ref_data(host, securities=batch, fields=ref_fields, timeout_ms=30000)
                 fund_data.update(batch_data)
             except Exception as e:
                 print(f"      Warning: Batch failed - {e}")
@@ -283,14 +281,14 @@ class AlgebraicTopologyStrategy:
         # =====================================================================
         # APPLY FILTERS
         # =====================================================================
-        print(f"[4/6] Applying liquidity and quality filters...")
-        
+        print("[4/6] Applying liquidity and quality filters...")
+
         market_data = MarketData()
         filtered_tickers = []
-        
+
         for ticker in tickers:
             data = fund_data.get(ticker, {})
-            
+
             market_cap = float(data.get("CUR_MKT_CAP", 0) or 0)
             avg_volume = float(data.get("VOLUME_AVG_20D", 0) or 0)
             roe = float(data.get("RETURN_ON_EQUITY", 0) or 0)
@@ -298,10 +296,10 @@ class AlgebraicTopologyStrategy:
             sector = str(data.get("GICS_SECTOR_NAME", "") or "")
             net_income = float(data.get("IS_NET_INCOME", 0) or 0)
             next_earn_date = data.get("EXPECTED_REPORT_DT")
-            
+
             # Apply filters
             passes = True
-            
+
             if market_cap < self.config.min_market_cap / 1_000_000:
                 passes = False
             if avg_volume < self.config.min_avg_volume:
@@ -314,7 +312,7 @@ class AlgebraicTopologyStrategy:
                 passes = False
             if sector in self.config.excluded_sectors:
                 passes = False
-            
+
             if passes:
                 # Calculate days to earnings
                 days_to_earnings = None
@@ -325,9 +323,9 @@ class AlgebraicTopologyStrategy:
                         else:
                             earn_date = next_earn_date
                         days_to_earnings = (earn_date - datetime.now().date()).days
-                    except:
+                    except (ValueError, TypeError, AttributeError):
                         pass
-                
+
                 stock = StockData(
                     ticker=ticker.replace(" Equity", ""),
                     bloomberg_ticker=ticker,
@@ -341,17 +339,17 @@ class AlgebraicTopologyStrategy:
                 )
                 market_data.stock_data[ticker] = stock
                 filtered_tickers.append(ticker)
-            
+
             if len(filtered_tickers) >= self.config.max_securities:
                 break
-        
+
         print(f"      {len(filtered_tickers)} stocks passed filters")
 
         # =====================================================================
         # FETCH PRICE DATA
         # =====================================================================
-        print(f"[5/6] Fetching historical prices...")
-        
+        print("[5/6] Fetching historical prices...")
+
         end_date = datetime.now()
         start_date = end_date - timedelta(days=self.config.lookback_days)
 
@@ -359,7 +357,7 @@ class AlgebraicTopologyStrategy:
         all_data = {}
 
         for i in range(0, len(filtered_tickers), batch_size):
-            batch = filtered_tickers[i:i + batch_size]
+            batch = filtered_tickers[i : i + batch_size]
             batch_num = i // batch_size + 1
             total_batches = (len(filtered_tickers) + batch_size - 1) // batch_size
             print(f"      Batch {batch_num}/{total_batches}")
@@ -381,32 +379,34 @@ class AlgebraicTopologyStrategy:
         for ticker in filtered_tickers:
             if ticker not in all_data:
                 continue
-            
+
             sec_data = all_data[ticker]
             if "PX_LAST" not in sec_data:
                 continue
-            
+
             prices = sec_data["PX_LAST"]
             if len(prices) >= self.config.min_data_points:
                 market_data.securities.append(ticker)
                 market_data.prices[ticker] = np.array(prices, dtype=float)
-                
+
                 # Update stock data
                 if ticker in market_data.stock_data:
                     market_data.stock_data[ticker].prices = prices
                     market_data.stock_data[ticker].current_price = float(prices[-1])
-                    
+
                     # Calculate volatility
                     returns = np.diff(np.log(np.array(prices, dtype=float)))
                     if len(returns) > 20:
-                        market_data.stock_data[ticker].volatility = float(np.std(returns[-20:]) * np.sqrt(252))
+                        market_data.stock_data[ticker].volatility = float(
+                            np.std(returns[-20:]) * np.sqrt(252)
+                        )
 
         print(f"      {len(market_data.securities)} securities with sufficient data")
 
         # =====================================================================
         # COMPUTE RETURNS AND CORRELATIONS
         # =====================================================================
-        print(f"[6/6] Computing returns and correlation matrices...")
+        print("[6/6] Computing returns and correlation matrices...")
         market_data = self._compute_returns_and_correlations(market_data)
 
         self.market_data = market_data
@@ -414,7 +414,7 @@ class AlgebraicTopologyStrategy:
 
     def _compute_returns_and_correlations(self, market_data: MarketData) -> MarketData:
         """Compute log returns and both full and rolling correlation matrices."""
-        
+
         # Compute log returns
         for security, prices in market_data.prices.items():
             returns = np.diff(np.log(prices))
@@ -443,11 +443,11 @@ class AlgebraicTopologyStrategy:
     # =========================================================================
     # LAPLACIAN CONSTRUCTION
     # =========================================================================
-    
+
     def build_graph_laplacian(self, use_rolling: bool = True) -> np.ndarray:
         """
         Build the graph Laplacian from correlation structure.
-        
+
         Args:
             use_rolling: If True, use rolling correlation (recent 60 days)
                         If False, use full history correlation
@@ -459,7 +459,7 @@ class AlgebraicTopologyStrategy:
             corr = self.market_data.rolling_correlation
         else:
             corr = self.market_data.correlation_matrix
-            
+
         if corr is None:
             raise ValueError("Correlation matrix not computed")
 
@@ -472,7 +472,7 @@ class AlgebraicTopologyStrategy:
 
         # Degree matrix
         degrees = adjacency.sum(axis=1)
-        
+
         # Handle zero degrees
         degrees = np.maximum(degrees, 1e-10)
 
@@ -490,7 +490,7 @@ class AlgebraicTopologyStrategy:
     def run_laplacian_diffusion(self, returns: np.ndarray, use_rolling: bool = True) -> np.ndarray:
         """
         Run Laplacian diffusion on returns.
-        
+
         Uses rolling Laplacian by default for regime adaptation.
         """
         if use_rolling:
@@ -514,7 +514,7 @@ class AlgebraicTopologyStrategy:
     # =========================================================================
     # PERSISTENT HOMOLOGY
     # =========================================================================
-    
+
     def compute_persistent_homology(self) -> TopologicalFeatures:
         """
         Compute persistent homology of the correlation structure.
@@ -525,7 +525,7 @@ class AlgebraicTopologyStrategy:
 
         # Use rolling correlation for most recent regime
         corr = self.market_data.rolling_correlation
-        n = corr.shape[0]
+        corr.shape[0]
 
         # Convert correlation to distance
         distance = np.sqrt(2 * (1 - np.clip(corr, -1, 1)))
@@ -547,15 +547,13 @@ class AlgebraicTopologyStrategy:
         """Compute persistence using ripser library."""
         try:
             import ripser
-            
+
             result = ripser.ripser(
-                distance_matrix, 
-                maxdim=self.config.max_dimension,
-                distance_matrix=True
+                distance_matrix, maxdim=self.config.max_dimension, distance_matrix=True
             )
-            
-            diagrams = result['dgms']
-            
+
+            diagrams = result["dgms"]
+
             # H0: Connected components
             if len(diagrams) > 0:
                 h0 = diagrams[0]
@@ -563,43 +561,46 @@ class AlgebraicTopologyStrategy:
                 # Finite Betti-0 at the end
                 finite_h0 = h0[np.isfinite(h0[:, 1])]
                 features.betti_numbers.append(len(h0) - len(finite_h0))
-            
+
             # H1: 1-dimensional cycles (holes)
             if len(diagrams) > 1:
                 h1 = diagrams[1]
                 features.persistence_diagrams[1] = h1
                 features.h1_cycles = len(h1)
                 features.betti_numbers.append(len(h1))
-            
+
             # H2: 2-dimensional voids
             if len(diagrams) > 2:
                 h2 = diagrams[2]
                 features.persistence_diagrams[2] = h2
                 features.betti_numbers.append(len(h2))
-            
+
             # Persistence entropy
             features.persistence_entropy = self._compute_persistence_entropy(diagrams)
-            
+
             # Total persistence
             features.total_persistence = sum(
                 np.sum(np.abs(d[:, 1] - d[:, 0])[np.isfinite(d[:, 1])])
-                for d in diagrams if len(d) > 0
+                for d in diagrams
+                if len(d) > 0
             )
-            
+
             # Regime features
-            features.regime_features = np.array([
-                features.persistence_entropy,
-                features.total_persistence,
-                features.h1_cycles,
-                features.betti_numbers[0] if features.betti_numbers else 1,
-            ])
-            
+            features.regime_features = np.array(
+                [
+                    features.persistence_entropy,
+                    features.total_persistence,
+                    features.h1_cycles,
+                    features.betti_numbers[0] if features.betti_numbers else 1,
+                ]
+            )
+
         except Exception as e:
             print(f"      Warning: ripser failed, using simplified: {e}")
             features = self._simplified_persistence(distance_matrix, features)
-        
+
         return features
-    
+
     def _compute_persistence_entropy(self, diagrams: list) -> float:
         """Compute persistence entropy from diagrams."""
         lifetimes = []
@@ -609,16 +610,16 @@ class AlgebraicTopologyStrategy:
             finite_mask = np.isfinite(dgm[:, 1])
             life = dgm[finite_mask, 1] - dgm[finite_mask, 0]
             lifetimes.extend(life)
-        
+
         if len(lifetimes) == 0:
             return 0.0
-        
+
         lifetimes = np.array(lifetimes)
         lifetimes = lifetimes[lifetimes > 0]
-        
+
         if len(lifetimes) == 0 or lifetimes.sum() == 0:
             return 0.0
-        
+
         probs = lifetimes / lifetimes.sum()
         entropy = -np.sum(probs * np.log(probs + 1e-10))
         return float(entropy)
@@ -664,19 +665,21 @@ class AlgebraicTopologyStrategy:
             features.persistence_entropy = -np.sum(probs * np.log(probs))
 
         # Regime features
-        features.regime_features = np.array([
-            np.mean(betti_0),
-            np.std(betti_0),
-            features.persistence_entropy,
-            betti_0[0] - betti_0[-1],
-        ])
+        features.regime_features = np.array(
+            [
+                np.mean(betti_0),
+                np.std(betti_0),
+                features.persistence_entropy,
+                betti_0[0] - betti_0[-1],
+            ]
+        )
 
         return features
 
     # =========================================================================
     # SIGNAL GENERATION (IMPROVED)
     # =========================================================================
-    
+
     def generate_signals(self) -> dict[str, float]:
         """
         Generate trading signals with improvements:
@@ -696,7 +699,7 @@ class AlgebraicTopologyStrategy:
 
         # Check VIX stop level
         if self.vix >= self.config.vix_stop_trading_threshold:
-            print(f"      ⚠️ VIX STOP: All signals set to 0")
+            print("      ⚠️ VIX STOP: All signals set to 0")
             for sec in securities:
                 signals[sec] = 0.0
             return signals
@@ -704,19 +707,19 @@ class AlgebraicTopologyStrategy:
         # =====================================================================
         # USE ROLLING WINDOW OF RETURNS (not just latest day)
         # =====================================================================
-        window = min(self.config.signal_window, 
-                     min(len(r) for r in self.market_data.returns.values()) - 1)
-        
+        window = min(
+            self.config.signal_window, min(len(r) for r in self.market_data.returns.values()) - 1
+        )
+
         # Average residuals over the window
         all_residuals = []
         for offset in range(window):
-            day_returns = np.array([
-                self.market_data.returns[sec][-(offset + 1)]
-                for sec in securities
-            ])
+            day_returns = np.array(
+                [self.market_data.returns[sec][-(offset + 1)] for sec in securities]
+            )
             day_residuals = self.run_laplacian_diffusion(day_returns)
             all_residuals.append(day_residuals)
-        
+
         # Average residuals across window
         avg_residuals = np.mean(all_residuals, axis=0)
 
@@ -732,7 +735,7 @@ class AlgebraicTopologyStrategy:
         # =====================================================================
         # REGIME ADJUSTMENTS
         # =====================================================================
-        
+
         # VIX adjustment
         vix_adjustment = 1.0
         if self.vix >= self.config.vix_reduce_50_threshold:
@@ -746,15 +749,17 @@ class AlgebraicTopologyStrategy:
         entropy_adjustment = 1.0
         if self.topo_features is not None:
             entropy = self.topo_features.persistence_entropy
-            
+
             if entropy > self.config.high_entropy_threshold:
                 entropy_adjustment = 0.5
-                self.alerts.append((AlertLevel.WARNING, f"High entropy ({entropy:.2f}): 50% reduction"))
+                self.alerts.append(
+                    (AlertLevel.WARNING, f"High entropy ({entropy:.2f}): 50% reduction")
+                )
             elif entropy > self.config.low_entropy_threshold:
                 # Linear interpolation
                 entropy_adjustment = 1.0 - 0.5 * (
-                    (entropy - self.config.low_entropy_threshold) / 
-                    (self.config.high_entropy_threshold - self.config.low_entropy_threshold)
+                    (entropy - self.config.low_entropy_threshold)
+                    / (self.config.high_entropy_threshold - self.config.low_entropy_threshold)
                 )
 
         total_adjustment = vix_adjustment * entropy_adjustment
@@ -785,7 +790,7 @@ class AlgebraicTopologyStrategy:
     # =========================================================================
     # POSITION SIZING (VOLATILITY-BASED WITH SECTOR CONSTRAINTS)
     # =========================================================================
-    
+
     def compute_positions(
         self, signals: dict[str, float], portfolio_value: float
     ) -> dict[str, float]:
@@ -797,13 +802,9 @@ class AlgebraicTopologyStrategy:
         """
         positions = {}
         sector_totals = {}
-        
+
         # Sort by absolute signal strength
-        sorted_signals = sorted(
-            signals.items(), 
-            key=lambda x: abs(x[1]), 
-            reverse=True
-        )
+        sorted_signals = sorted(signals.items(), key=lambda x: abs(x[1]), reverse=True)
 
         for security, signal in sorted_signals:
             if abs(signal) < 0.1:  # Skip very weak signals
@@ -847,7 +848,7 @@ class AlgebraicTopologyStrategy:
     # =========================================================================
     # MAIN ENTRY POINT
     # =========================================================================
-    
+
     def run(self, host: "RemoteHost") -> dict[str, float]:
         """Run the complete improved strategy pipeline."""
         print("=" * 70)
@@ -906,10 +907,15 @@ class AlgebraicTopologyStrategy:
 
         # Print stocks in earnings blackout
         blackout = [
-            sec for sec in self.market_data.securities
-            if (self.market_data.stock_data.get(sec) and 
-                self.market_data.stock_data[sec].days_to_earnings is not None and
-                0 <= self.market_data.stock_data[sec].days_to_earnings <= self.config.earnings_blackout_days)
+            sec
+            for sec in self.market_data.securities
+            if (
+                self.market_data.stock_data.get(sec)
+                and self.market_data.stock_data[sec].days_to_earnings is not None
+                and 0
+                <= self.market_data.stock_data[sec].days_to_earnings
+                <= self.config.earnings_blackout_days
+            )
         ]
         if blackout:
             print(f"Earnings blackout ({len(blackout)} stocks): {blackout[:5]}")
@@ -918,7 +924,7 @@ class AlgebraicTopologyStrategy:
         # Signal stats
         signal_values = list(signals.values())
         non_zero = [s for s in signal_values if s != 0]
-        
+
         print(f"Signals: {len(non_zero)} active (of {len(signals)} total)")
         if non_zero:
             print(f"Signal stats: mean={np.mean(non_zero):.4f}, std={np.std(non_zero):.4f}")
@@ -930,14 +936,14 @@ class AlgebraicTopologyStrategy:
 
         # Top signals
         sorted_signals = sorted(signals.items(), key=lambda x: x[1], reverse=True)
-        
+
         print("TOP LONG SIGNALS:")
         for sec, sig in sorted_signals[:5]:
             if sig > 0:
                 stock = self.market_data.stock_data.get(sec)
                 sector = stock.sector[:15] if stock else "N/A"
                 print(f"  {sec:25s} {sig:+.4f}  [{sector}]")
-        
+
         print()
         print("TOP SHORT SIGNALS:")
         for sec, sig in sorted_signals[-5:]:

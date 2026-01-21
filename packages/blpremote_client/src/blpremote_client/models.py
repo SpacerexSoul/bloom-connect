@@ -1,8 +1,9 @@
 """Pydantic models for execution plans and responses."""
 
-from typing import Any, Literal, Optional, Union
-from pydantic import BaseModel, Field
 import uuid
+from typing import Any, Literal, Optional, Union
+
+from pydantic import BaseModel, Field
 
 
 # Operation types for the IR
@@ -115,7 +116,9 @@ class ExecutionResult(BaseModel):
                 return pd.DataFrame()
             return pd.DataFrame.from_dict(self.data, orient="index")
         except ImportError:
-            raise ImportError("pandas is required for to_dataframe(). Install with: pip install pandas")
+            raise ImportError(
+                "pandas is required for to_dataframe(). Install with: pip install pandas"
+            )
 
 
 class LoginRequest(BaseModel):

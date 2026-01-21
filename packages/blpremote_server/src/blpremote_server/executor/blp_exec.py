@@ -4,23 +4,24 @@ import time
 from typing import Any, Optional
 
 from blpremote_server.config import settings
-from blpremote_server.exceptions import SessionError, TimeoutError, SecurityError, FieldError
+from blpremote_server.exceptions import SessionError, TimeoutError
 from blpremote_server.models import (
+    AppendOp,
+    CollectResponseOp,
+    CreateRequestOp,
+    ErrorDetail,
     ExecutionPlan,
     ExecutionResult,
-    ErrorDetail,
-    StartSessionOp,
     OpenServiceOp,
-    CreateRequestOp,
-    AppendOp,
-    SetOp,
     SendRequestOp,
-    CollectResponseOp,
+    SetOp,
+    StartSessionOp,
 )
 
 # Try to import blpapi - only available on Windows with Bloomberg
 try:
     import blpapi
+
     BLPAPI_AVAILABLE = True
 except ImportError:
     BLPAPI_AVAILABLE = False
@@ -165,21 +166,27 @@ class BloombergExecutor:
                 # Check for errors in the message
                 if msg.hasElement("responseError"):
                     error_elem = msg.getElement("responseError")
-                    errors.append(ErrorDetail(
-                        code="BLP_RESPONSE_ERROR",
-                        message=error_elem.getElementAsString("message"),
-                    ))
+                    errors.append(
+                        ErrorDetail(
+                            code="BLP_RESPONSE_ERROR",
+                            message=error_elem.getElementAsString("message"),
+                        )
+                    )
                     continue
 
                 # Extract security data (handles both Reference and Historical)
                 msg_data = extract_security_data(msg)
-                
+
                 # Merge data - for historical data, same security can come in multiple messages
                 for sec, fields in msg_data.items():
                     if sec in data:
                         # Merge field data (extend lists for historical data)
                         for field, value in fields.items():
-                            if field in data[sec] and isinstance(value, list) and isinstance(data[sec][field], list):
+                            if (
+                                field in data[sec]
+                                and isinstance(value, list)
+                                and isinstance(data[sec][field], list)
+                            ):
                                 data[sec][field].extend(value)
                             else:
                                 data[sec][field] = value
@@ -189,7 +196,7 @@ class BloombergExecutor:
                 # Check for per-security errors (ReferenceDataResponse style)
                 if msg.hasElement("securityData"):
                     security_data = msg.getElement("securityData")
-                    
+
                     # Handle array (ReferenceDataResponse) vs single element (HistoricalDataResponse)
                     if security_data.isArray():
                         for i in range(security_data.numValues()):
@@ -207,28 +214,36 @@ class BloombergExecutor:
     def _check_security_errors(self, sec_element: Any, errors: list[ErrorDetail]) -> None:
         """Check a security element for errors."""
         try:
-            sec_name = sec_element.getElementAsString("security") if sec_element.hasElement("security") else "unknown"
-            
+            sec_name = (
+                sec_element.getElementAsString("security")
+                if sec_element.hasElement("security")
+                else "unknown"
+            )
+
             if sec_element.hasElement("securityError"):
                 err = sec_element.getElement("securityError")
-                errors.append(ErrorDetail(
-                    code="BLP_SECURITY_ERROR",
-                    message=err.getElementAsString("message"),
-                    security=sec_name,
-                ))
-            
+                errors.append(
+                    ErrorDetail(
+                        code="BLP_SECURITY_ERROR",
+                        message=err.getElementAsString("message"),
+                        security=sec_name,
+                    )
+                )
+
             if sec_element.hasElement("fieldExceptions"):
                 field_exc = sec_element.getElement("fieldExceptions")
                 for j in range(field_exc.numValues()):
                     fe = field_exc.getValueAsElement(j)
                     field_id = fe.getElementAsString("fieldId")
                     err_info = fe.getElement("errorInfo")
-                    errors.append(ErrorDetail(
-                        code="BLP_FIELD_ERROR",
-                        message=err_info.getElementAsString("message"),
-                        security=sec_name,
-                        field=field_id,
-                    ))
+                    errors.append(
+                        ErrorDetail(
+                            code="BLP_FIELD_ERROR",
+                            message=err_info.getElementAsString("message"),
+                            security=sec_name,
+                            field=field_id,
+                        )
+                    )
         except Exception:
             pass
 

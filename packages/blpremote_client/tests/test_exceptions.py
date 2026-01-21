@@ -1,16 +1,15 @@
 """Tests for exception handling and error mapping."""
 
-import pytest
 from blpremote_client.exceptions import (
-    BlpRemoteError,
     AuthenticationError,
+    BlpRemoteError,
     ConnectionError,
     ExecutionError,
-    ValidationError,
+    FieldError,
+    SecurityError,
     SessionError,
     TimeoutError,
-    SecurityError,
-    FieldError,
+    ValidationError,
     from_error_code,
 )
 
