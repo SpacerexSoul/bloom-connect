@@ -1,4 +1,8 @@
-"""Server-side authentication: password hashing and JWT tokens."""
+"""Server-side authentication: password hashing and JWT tokens.
+
+Uses bcrypt directly (instead of passlib) for simpler deployment
+and better version compatibility.
+"""
 
 import json
 import os
@@ -6,13 +10,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from blpremote_server.config import settings
-
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class UserStore:
@@ -37,8 +38,11 @@ class UserStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "w") as f:
             json.dump(self._users, f, indent=2)
-        # Restrict permissions
-        os.chmod(self.path, 0o600)
+        # Restrict permissions (works on Windows too)
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass  # Windows may not support chmod
 
     def create_user(self, username: str, password: str) -> bool:
         """Create a new user with hashed password."""
@@ -72,23 +76,29 @@ class UserStore:
 
 
 def hash_password(password: str) -> str:
-    """Hash a password.
+    """Hash a password using bcrypt.
 
     Note: bcrypt has a 72-byte limit on passwords. We truncate to ensure compatibility.
     """
-    # Encode to bytes and truncate to 72 bytes (bcrypt limit)
-    password_bytes = password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
-    return pwd_context.hash(password_bytes)
+    # Encode and truncate to 72 bytes (bcrypt limit)
+    password_bytes = password.encode("utf-8")[:72]
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password_bytes, salt)
+    return hashed.decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash.
+    """Verify a password against its bcrypt hash.
 
     Note: bcrypt has a 72-byte limit on passwords. We truncate to ensure compatibility.
     """
-    # Encode to bytes and truncate to 72 bytes (bcrypt limit)
-    password_bytes = plain_password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
-    return pwd_context.verify(password_bytes, hashed_password)
+    try:
+        # Encode and truncate to 72 bytes (bcrypt limit)
+        password_bytes = plain_password.encode("utf-8")[:72]
+        hashed_bytes = hashed_password.encode("utf-8")
+        return bcrypt.checkpw(password_bytes, hashed_bytes)
+    except (ValueError, TypeError):
+        return False
 
 
 def create_access_token(username: str, expires_delta: Optional[timedelta] = None) -> str:
