@@ -66,7 +66,7 @@ class TestValidatePlan:
             OpenServiceOp(service="//blp/refdata"),
             CreateRequestOp(
                 service="//blp/refdata",
-                request="HistoricalDataRequest",  # Not in allowlist
+                request="IntradayBarRequest",  # Not in allowlist
                 id="req1",
             ),
         ]
