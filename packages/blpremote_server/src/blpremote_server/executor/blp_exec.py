@@ -101,11 +101,12 @@ class BloombergExecutor:
                                 ),
                             )
                         )
-                    result_data, result_errors = self._collect_response(
+                    norm = self._collect_response(
                         mgr, op.correlation_id, op.timeout_ms
                     )
-                    self._merge_data(data, result_data)
-                    errors.extend(result_errors)
+                    self._merge_data(data, norm.data)
+                    errors.extend(norm.errors)
+                    warnings.extend(norm.warnings)
 
         except SessionError as e:
             errors.append(ErrorDetail(code=e.code, message=e.message))
@@ -169,15 +170,16 @@ class BloombergExecutor:
     @staticmethod
     def _collect_response(
         mgr: SessionManager, correlation_id: str, timeout_ms: int
-    ) -> tuple[dict[str, Any], list[ErrorDetail]]:
-        from blpremote_server.executor.normalize import extract_security_data
+    ):
+        """Drain the per-cid queue until RESPONSE, returning a single
+        merged NormalizedMessage (data + errors + warnings)."""
+        from blpremote_server.executor.normalize import (
+            NormalizedMessage,
+            normalize_message,
+        )
 
-        q = mgr.register_queue(correlation_id)  # idempotent: replaces if exists
-        # The send path already registered; this is just retrieving the same
-        # queue. Either way, ``mgr._queues[cid]`` is set.
-
-        data: dict[str, Any] = {}
-        errors: list[ErrorDetail] = []
+        q = mgr.register_queue(correlation_id)  # idempotent
+        merged = NormalizedMessage()
         deadline = time.time() + (timeout_ms / 1000.0)
 
         while True:
@@ -193,33 +195,15 @@ class BloombergExecutor:
                     f"timeout waiting for response: {correlation_id}"
                 )
 
-            if msg.hasElement("responseError"):
-                err_elem = msg.getElement("responseError")
-                errors.append(
-                    ErrorDetail(
-                        code="BLP_RESPONSE_ERROR",
-                        message=err_elem.getElementAsString("message"),
-                    )
-                )
-            else:
-                msg_data = extract_security_data(msg)
-                BloombergExecutor._merge_data(data, msg_data)
+            norm = normalize_message(msg)
+            BloombergExecutor._merge_data(merged.data, norm.data)
+            merged.errors.extend(norm.errors)
+            merged.warnings.extend(norm.warnings)
 
-                if msg.hasElement("securityData"):
-                    sec_data = msg.getElement("securityData")
-                    if sec_data.isArray():
-                        for i in range(sec_data.numValues()):
-                            BloombergExecutor._check_security_errors(
-                                sec_data.getValueAsElement(i), errors
-                            )
-                    else:
-                        BloombergExecutor._check_security_errors(sec_data, errors)
-
-            # RESPONSE marks end of stream for this correlation id.
             if event_type == blpapi.Event.RESPONSE:
                 break
 
-        return data, errors
+        return merged
 
     @staticmethod
     def _merge_data(
@@ -235,50 +219,6 @@ class BloombergExecutor:
                         data[sec][field] = value
             else:
                 data[sec] = fields
-
-    @staticmethod
-    def _check_security_errors(
-        sec_element: Any, errors: list[ErrorDetail]
-    ) -> None:
-        try:
-            sec_name = (
-                sec_element.getElementAsString("security")
-                if sec_element.hasElement("security")
-                else "unknown"
-            )
-            if sec_element.hasElement("securityError"):
-                err = sec_element.getElement("securityError")
-                errors.append(
-                    ErrorDetail(
-                        code="BLP_SECURITY_ERROR",
-                        message=err.getElementAsString("message"),
-                        security=sec_name,
-                    )
-                )
-            if sec_element.hasElement("fieldExceptions"):
-                field_exc = sec_element.getElement("fieldExceptions")
-                for j in range(field_exc.numValues()):
-                    fe = field_exc.getValueAsElement(j)
-                    field_id = fe.getElementAsString("fieldId")
-                    err_info = fe.getElement("errorInfo")
-                    # Per M2 §2.3: code = BLP_FIELD_<CATEGORY> using the
-                    # category element on errorInfo (BAD_FLD,
-                    # NOT_APPLICABLE_TO_REF_DATA, etc.). Falls back to
-                    # BLP_FIELD_UNKNOWN if the field isn't present.
-                    if err_info.hasElement("category"):
-                        category = err_info.getElementAsString("category")
-                    else:
-                        category = "UNKNOWN"
-                    errors.append(
-                        ErrorDetail(
-                            code=f"BLP_FIELD_{category}",
-                            message=err_info.getElementAsString("message"),
-                            security=sec_name,
-                            field=field_id,
-                        )
-                    )
-        except Exception:
-            pass
 
     # --- Mock path (no blpapi installed) ------------------------------
 

@@ -1,9 +1,8 @@
-"""Tests for per-field error code refinement (M2 §2.3, win-side (b)).
+"""Tests for per-field error code refinement (M2 §2.3).
 
-Loads the synth fixture from packages/blpremote_server/tests/fixtures/
-refdata_with_field_exceptions.json and feeds it through a fake
-blpapi.Element wrapper so we can exercise the executor's
-_check_security_errors path without a live Bloomberg session.
+Drives the synth fixture through ``normalize_message`` (M2 §2.2
+dispatcher) and asserts the resulting NormalizedMessage carries
+BLP_FIELD_<CATEGORY> errors with security + field populated.
 
 Phase 2: replace the synth fixture with a live-captured one and
 re-run the same assertions to confirm BBG actually emits these
@@ -18,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from blpremote_server.executor.blp_exec import BloombergExecutor
+from blpremote_server.executor.normalize import normalize_message
 from blpremote_server.models import ErrorDetail
 
 
@@ -29,31 +28,44 @@ FIXTURE = (
 )
 
 
-# --- Fake blpapi.Element wrapper -------------------------------------
+# --- Fake blpapi.Element / Message wrapper ---------------------------
 
 
 class _FakeElement:
     """Wraps a JSON node as a blpapi.Element-shaped object.
 
-    Supports the subset _check_security_errors needs: hasElement,
-    getElement, getElementAsString, isArray, numValues,
-    getValueAsElement.
-
-    A node passed in as a list is treated as an array.
+    Supports: hasElement, getElement, getElementAsString, isArray,
+    numValues, numElements, getValueAsElement, getElement(index),
+    name. Lists become arrays.
     """
 
-    def __init__(self, node: Any):
+    def __init__(self, node: Any, name: str = ""):
         self._n = node
+        self._name = name
 
+    # Identity / metadata
+    def name(self) -> str:
+        return self._name
+
+    # Containment
     def hasElement(self, name: str) -> bool:
         return isinstance(self._n, dict) and name in self._n
 
-    def getElement(self, name: str) -> "_FakeElement":
-        return _FakeElement(self._n[name])
+    def getElement(self, key):
+        if isinstance(key, int):
+            # Index into a dict's items in order.
+            assert isinstance(self._n, dict)
+            k = list(self._n.keys())[key]
+            return _FakeElement(self._n[k], name=k)
+        return _FakeElement(self._n[key], name=key)
 
     def getElementAsString(self, name: str) -> str:
         return str(self._n[name])
 
+    def numElements(self) -> int:
+        return len(self._n) if isinstance(self._n, dict) else 0
+
+    # Array view
     def isArray(self) -> bool:
         return isinstance(self._n, list)
 
@@ -63,100 +75,156 @@ class _FakeElement:
     def getValueAsElement(self, i: int) -> "_FakeElement":
         return _FakeElement(self._n[i])
 
+    # Value extraction (used by the generic fallback path; not exercised here)
+    def isNull(self) -> bool:
+        return self._n is None
 
-# --- Fixture loader --------------------------------------------------
+    def datatype(self) -> int:
+        # Map Python type → blpapi.DataType integer (subset).
+        if isinstance(self._n, bool):
+            return 1
+        if isinstance(self._n, int):
+            return 5
+        if isinstance(self._n, float):
+            return 9
+        return 11  # STRING / fallback
+
+    def getValueAsBool(self) -> bool:
+        return bool(self._n)
+
+    def getValueAsInteger(self) -> int:
+        return int(self._n)
+
+    def getValueAsFloat(self) -> float:
+        return float(self._n)
+
+    def getValueAsString(self) -> str:
+        return str(self._n)
+
+    def getValue(self) -> Any:
+        return self._n
 
 
-def _load_security_records() -> list[_FakeElement]:
-    """Return the fixture's securityData[] records as fake elements."""
+def _load_response_message() -> _FakeElement:
+    """Load the fixture and return a fake Message at the
+    ReferenceDataResponse level."""
     payload = json.loads(FIXTURE.read_text())
-    sec_array = payload["ReferenceDataResponse"]["securityData"]
-    return [_FakeElement(rec) for rec in sec_array]
+    return _FakeElement(payload["ReferenceDataResponse"])
 
 
 # --- Tests -----------------------------------------------------------
 
 
 def test_field_exceptions_emit_category_specific_codes():
-    """Each fieldException becomes BLP_FIELD_<CATEGORY> with security
-    + field populated. Synth fixture has BAD_FLD and
-    NOT_APPLICABLE_TO_REF_DATA."""
-    errors: list[ErrorDetail] = []
-    for sec_record in _load_security_records():
-        BloombergExecutor._check_security_errors(sec_record, errors)
+    msg = _load_response_message()
+    norm = normalize_message(msg)
 
-    assert len(errors) == 2
+    assert "AAPL US Equity" in norm.data
+    fields = norm.data["AAPL US Equity"]
+    assert fields["PX_LAST"] == 285.0
+    assert fields["NAME"] == "APPLE INC"
 
-    by_field = {e.field: e for e in errors}
-    assert "NOT_A_REAL_FIELD" in by_field
-    assert "NOT_APPLICABLE_FIELD" in by_field
+    assert len(norm.errors) == 2
+    by_field = {e.field: e for e in norm.errors}
+    bad = by_field["NOT_A_REAL_FIELD"]
+    assert bad.code == "BLP_FIELD_BAD_FLD"
+    assert bad.security == "AAPL US Equity"
+    assert "Field not valid" in bad.message
 
-    bad_fld = by_field["NOT_A_REAL_FIELD"]
-    assert bad_fld.code == "BLP_FIELD_BAD_FLD"
-    assert bad_fld.security == "AAPL US Equity"
-    assert "Field not valid" in bad_fld.message
+    notapp = by_field["NOT_APPLICABLE_FIELD"]
+    assert notapp.code == "BLP_FIELD_NOT_APPLICABLE_TO_REF_DATA"
+    assert notapp.security == "AAPL US Equity"
+    assert "Field not applicable" in notapp.message
 
-    not_applicable = by_field["NOT_APPLICABLE_FIELD"]
-    assert not_applicable.code == "BLP_FIELD_NOT_APPLICABLE_TO_REF_DATA"
-    assert not_applicable.security == "AAPL US Equity"
-    assert "Field not applicable" in not_applicable.message
+    assert norm.warnings == []
 
 
 def test_field_exceptions_with_no_category_fall_back_to_unknown():
-    """If errorInfo lacks a category element (defensive), code falls
-    back to BLP_FIELD_UNKNOWN rather than crashing."""
-    sec_record = _FakeElement(
+    msg = _FakeElement(
         {
-            "security": "TEST US Equity",
-            "fieldExceptions": [
+            "securityData": [
                 {
-                    "fieldId": "MISSING_CATEGORY_FIELD",
-                    "errorInfo": {
-                        # Note: no `category` key.
+                    "security": "TEST US Equity",
+                    "fieldExceptions": [
+                        {
+                            "fieldId": "MISSING_CATEGORY_FIELD",
+                            "errorInfo": {
+                                "source": "test",
+                                "code": 0,
+                                "message": "no category set in errorInfo",
+                            },
+                        }
+                    ],
+                    "fieldData": {},
+                }
+            ]
+        }
+    )
+    norm = normalize_message(msg)
+    assert len(norm.errors) == 1
+    e = norm.errors[0]
+    assert e.code == "BLP_FIELD_UNKNOWN"
+    assert e.security == "TEST US Equity"
+    assert e.field == "MISSING_CATEGORY_FIELD"
+
+
+def test_security_error_coexists_with_field_exceptions():
+    msg = _FakeElement(
+        {
+            "securityData": [
+                {
+                    "security": "BAD_TICKER",
+                    "securityError": {
                         "source": "test",
-                        "code": 0,
-                        "message": "no category set in errorInfo",
+                        "code": 1,
+                        "category": "BAD_SEC",
+                        "message": "Unknown/Invalid Security",
                     },
+                    "fieldExceptions": [
+                        {
+                            "fieldId": "PX_LAST",
+                            "errorInfo": {
+                                "category": "NOT_APPLICABLE_TO_REF_DATA",
+                                "message": "field not applicable",
+                            },
+                        }
+                    ],
+                    "fieldData": {},
                 }
-            ],
+            ]
         }
     )
-    errors: list[ErrorDetail] = []
-    BloombergExecutor._check_security_errors(sec_record, errors)
-    assert len(errors) == 1
-    assert errors[0].code == "BLP_FIELD_UNKNOWN"
-    assert errors[0].security == "TEST US Equity"
-    assert errors[0].field == "MISSING_CATEGORY_FIELD"
-
-
-def test_security_error_still_works_alongside_field_exceptions():
-    """If a record has both securityError and fieldExceptions, both
-    surface as separate ErrorDetail entries."""
-    sec_record = _FakeElement(
-        {
-            "security": "BAD_TICKER",
-            "securityError": {
-                "source": "test",
-                "code": 1,
-                "category": "BAD_SEC",
-                "message": "Unknown/Invalid Security",
-            },
-            "fieldExceptions": [
-                {
-                    "fieldId": "PX_LAST",
-                    "errorInfo": {
-                        "category": "NOT_APPLICABLE_TO_REF_DATA",
-                        "message": "field not applicable",
-                    },
-                }
-            ],
-        }
-    )
-    errors: list[ErrorDetail] = []
-    BloombergExecutor._check_security_errors(sec_record, errors)
-    assert len(errors) == 2
-    codes = sorted(e.code for e in errors)
+    norm = normalize_message(msg)
+    assert len(norm.errors) == 2
+    codes = sorted(e.code for e in norm.errors)
     assert codes == [
         "BLP_FIELD_NOT_APPLICABLE_TO_REF_DATA",
         "BLP_SECURITY_ERROR",
     ]
+
+
+def test_response_error_short_circuits_dispatch():
+    """If the message has responseError, no securityData processing
+    happens — only the response-level error surfaces."""
+    msg = _FakeElement(
+        {
+            "responseError": {
+                "code": 99,
+                "category": "AUTHORIZATION_FAILURE",
+                "message": "auth failed",
+            },
+            # securityData would normally be processed too — confirm
+            # responseError takes precedence and nothing else happens.
+            "securityData": [
+                {
+                    "security": "AAPL US Equity",
+                    "fieldData": {"PX_LAST": 285},
+                }
+            ],
+        }
+    )
+    norm = normalize_message(msg)
+    assert norm.data == {}
+    assert len(norm.errors) == 1
+    assert norm.errors[0].code == "BLP_RESPONSE_ERROR"
+    assert "auth failed" in norm.errors[0].message
