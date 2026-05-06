@@ -247,17 +247,77 @@ def _normalize_tick_data(
 
 
 def _normalize_field_info(message: Any) -> NormalizedMessage:
-    """FieldInfoResponse — c3 will fill this in.
+    """FieldInfoResponse from //blp/apiflds.
 
-    Note: dispatcher keys on the response element ``fieldData`` per
-    contract r2 (the request shape uses ``fields`` — easy to confuse).
+    Response shape: ``fieldData[]`` of ``{id, fieldInfo: {...}}``.
+    Output: ``data["_field_info"] = {field_id: {fieldInfo dict}}`` so
+    clients can do ``info["PX_LAST"]["description"]`` directly.
+
+    Records that have a ``fieldError`` instead of ``fieldInfo``
+    surface as an ErrorDetail with code BLP_FIELD_INFO_ERROR.
     """
-    return _normalize_generic(message)
+    out = NormalizedMessage()
+    field_data = message.getElement("fieldData")
+    info_by_key: dict[str, Any] = {}
+    for i in range(field_data.numValues()):
+        record = field_data.getValueAsElement(i)
+        # The response's `id` field is the BBG internal id (e.g. "PR005").
+        # The fieldInfo.mnemonic is the human-readable name (e.g. "PX_LAST")
+        # and is what clients sent in the request — index by that when
+        # available so callers can look up by what they asked for. Fall
+        # back to the response id for records that lack fieldInfo (errors).
+        field_id = (
+            record.getElementAsString("id")
+            if record.hasElement("id")
+            else f"_unknown_{i}"
+        )
+        if record.hasElement("fieldInfo"):
+            field_info_dict = _walk_to_dict(record.getElement("fieldInfo"))
+            mnemonic = (
+                field_info_dict.get("mnemonic")
+                if isinstance(field_info_dict, dict)
+                else None
+            )
+            key = mnemonic if mnemonic else field_id
+            info_by_key[key] = field_info_dict
+        elif record.hasElement("fieldError"):
+            err = record.getElement("fieldError")
+            msg = (
+                err.getElementAsString("message")
+                if err.hasElement("message")
+                else "field error"
+            )
+            out.errors.append(
+                ErrorDetail(
+                    code="BLP_FIELD_INFO_ERROR",
+                    message=msg,
+                    field=field_id,
+                )
+            )
+    out.data["_field_info"] = info_by_key
+    return out
 
 
 def _normalize_schema(message: Any) -> NormalizedMessage:
-    """SchemaResponse — c3 will fill this in."""
-    return _normalize_generic(message)
+    """SchemaResponse — best-effort dict walk.
+
+    blpapi's primary schema-introspection path is
+    ``Service.requestDefinitions()`` rather than a wire SchemaRequest,
+    so this branch rarely fires in practice. When it does, we walk
+    the message into a plain dict under ``data["_schema"]``. The
+    SchemaCache module (M2 d) consumes service-level introspection
+    via an out-of-band path, not via this normaliser.
+    """
+    out = NormalizedMessage()
+    out.data["_schema"] = _element_to_dict(message)
+    return out
+
+
+def _walk_to_dict(elem: Any) -> Any:
+    """Walk a single Element subtree into a plain Python dict.
+    Distinct from ``_element_to_dict`` (which expects a Message
+    root) — this one starts from any nested element."""
+    return _element_to_dict(elem)
 
 
 def _normalize_generic(message: Any) -> NormalizedMessage:
