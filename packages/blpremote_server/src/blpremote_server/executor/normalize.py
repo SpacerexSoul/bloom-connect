@@ -35,8 +35,16 @@ class NormalizedMessage:
     warnings: list[ErrorDetail] = field(default_factory=list)
 
 
-def normalize_message(message: Any) -> NormalizedMessage:
-    """Dispatch on root element of a blpapi.Message."""
+def normalize_message(
+    message: Any, security_hint: str | None = None
+) -> NormalizedMessage:
+    """Dispatch on root element of a blpapi.Message.
+
+    ``security_hint`` is used by bar/tick normalisers to key their
+    output under the requested security (the response itself doesn't
+    echo it). Refdata / historical / schema branches ignore the hint
+    because their responses already include security identifiers.
+    """
     if not hasattr(message, "hasElement"):
         return NormalizedMessage()
 
@@ -55,9 +63,9 @@ def normalize_message(message: Any) -> NormalizedMessage:
     if message.hasElement("securityData"):
         return _normalize_security_data(message)
     if message.hasElement("barData"):
-        return _normalize_bar_data(message)  # c2 stub for now
+        return _normalize_bar_data(message, security_hint)
     if message.hasElement("tickData"):
-        return _normalize_tick_data(message)  # c2 stub for now
+        return _normalize_tick_data(message, security_hint)
     if message.hasElement("fieldData"):
         return _normalize_field_info(message)  # c3 stub for now
     if message.hasElement("schema") or message.hasElement("metaData"):
@@ -183,14 +191,59 @@ def _extract_historical_field_data(field_data: Any) -> dict[str, list[Any]]:
 # ---------- bar / tick / field-info / schema (stubs for c2/c3) ------
 
 
-def _normalize_bar_data(message: Any) -> NormalizedMessage:
-    """IntradayBarResponse — c2 will fill this in."""
-    return _normalize_generic(message)
+def _normalize_bar_data(
+    message: Any, security_hint: str | None
+) -> NormalizedMessage:
+    """IntradayBarResponse — barData.barTickData[] of bar records.
+
+    Each bar item has time/open/high/low/close/volume/numEvents/value.
+    Output: data[security_hint] = [bar_record, ...]. Falls back to
+    "_bars" if no security_hint was provided.
+    """
+    out = NormalizedMessage()
+    bar_data = message.getElement("barData")
+    if not bar_data.hasElement("barTickData"):
+        return out
+    bar_tick_data = bar_data.getElement("barTickData")
+    bars: list[dict[str, Any]] = []
+    for i in range(bar_tick_data.numValues()):
+        record = bar_tick_data.getValueAsElement(i)
+        bar: dict[str, Any] = {}
+        for j in range(record.numElements()):
+            elem = record.getElement(j)
+            bar[str(elem.name())] = _extract_field_value(elem)
+        bars.append(bar)
+    key = security_hint if security_hint else "_bars"
+    out.data[key] = bars
+    return out
 
 
-def _normalize_tick_data(message: Any) -> NormalizedMessage:
-    """IntradayTickResponse — c2 will fill this in."""
-    return _normalize_generic(message)
+def _normalize_tick_data(
+    message: Any, security_hint: str | None
+) -> NormalizedMessage:
+    """IntradayTickResponse — tickData.tickData[] of tick records.
+
+    The double 'tickData' nesting is a real BBG quirk, not a typo.
+    Each tick has time/type/value/size + optional condCode etc.
+    Output: data[security_hint] = [tick_record, ...]. Falls back to
+    "_ticks" if no security_hint was provided.
+    """
+    out = NormalizedMessage()
+    outer = message.getElement("tickData")
+    if not outer.hasElement("tickData"):
+        return out
+    inner = outer.getElement("tickData")
+    ticks: list[dict[str, Any]] = []
+    for i in range(inner.numValues()):
+        record = inner.getValueAsElement(i)
+        tick: dict[str, Any] = {}
+        for j in range(record.numElements()):
+            elem = record.getElement(j)
+            tick[str(elem.name())] = _extract_field_value(elem)
+        ticks.append(tick)
+    key = security_hint if security_hint else "_ticks"
+    out.data[key] = ticks
+    return out
 
 
 def _normalize_field_info(message: Any) -> NormalizedMessage:
@@ -255,8 +308,11 @@ def _extract_field_value(field: Any) -> Any:
             return field.getValueAsString()
         if dtype in (12, 13):
             dt = field.getValueAsDatetime()
-            if hasattr(dt, "strftime"):
-                return dt.strftime("%Y-%m-%d")
+            # isoformat() preserves time-of-day for datetime objects
+            # (essential for IntradayBar / IntradayTick) while
+            # collapsing pure date objects to YYYY-MM-DD as before.
+            if hasattr(dt, "isoformat"):
+                return dt.isoformat()
             return str(dt)
         return str(field.getValue())
     except Exception:

@@ -38,7 +38,12 @@ class Settings(BaseSettings):
         description="Allowed Bloomberg services",
     )
     allowed_request_types: list[str] = Field(
-        default=["ReferenceDataRequest", "HistoricalDataRequest"],
+        default=[
+            "ReferenceDataRequest",
+            "HistoricalDataRequest",
+            "IntradayBarRequest",
+            "IntradayTickRequest",
+        ],
         description="Allowed request types",
     )
 

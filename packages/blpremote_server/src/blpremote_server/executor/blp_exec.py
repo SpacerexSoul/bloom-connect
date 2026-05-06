@@ -64,6 +64,12 @@ class BloombergExecutor:
         # Per-call state — never shared across concurrent execute() calls.
         requests: dict[str, Any] = {}
         registered_cids: list[str] = []
+        # request_id -> security label (last seen on Append/Set with the
+        # field "security" or first value of "securities"). Used as a
+        # hint to bar/tick normalisers since IntradayBarResponse +
+        # IntradayTickResponse don't echo the security back in the body.
+        request_security: dict[str, str] = {}
+        cid_security: dict[str, str] = {}
 
         mgr = self._manager()
 
@@ -83,12 +89,18 @@ class BloombergExecutor:
                     requests[op.id] = service.createRequest(op.request)
                 elif isinstance(op, AppendOp):
                     self._append(requests, op.id, op.path, op.value)
+                    if op.path in ("security", "securities"):
+                        request_security.setdefault(op.id, str(op.value))
                 elif isinstance(op, SetOp):
                     self._set(requests, op.id, op.path, op.value)
+                    if op.path == "security":
+                        request_security[op.id] = str(op.value)
                 elif isinstance(op, SendRequestOp):
                     self._send_request(
                         mgr, requests, op.id, op.correlation_id, registered_cids
                     )
+                    if op.id in request_security:
+                        cid_security[op.correlation_id] = request_security[op.id]
                 elif isinstance(op, (CollectResponseOp, CollectRefdataResponseOp)):
                     if isinstance(op, CollectRefdataResponseOp):
                         warnings.append(
@@ -102,7 +114,10 @@ class BloombergExecutor:
                             )
                         )
                     norm = self._collect_response(
-                        mgr, op.correlation_id, op.timeout_ms
+                        mgr,
+                        op.correlation_id,
+                        op.timeout_ms,
+                        security_hint=cid_security.get(op.correlation_id),
                     )
                     self._merge_data(data, norm.data)
                     errors.extend(norm.errors)
@@ -169,10 +184,18 @@ class BloombergExecutor:
 
     @staticmethod
     def _collect_response(
-        mgr: SessionManager, correlation_id: str, timeout_ms: int
+        mgr: SessionManager,
+        correlation_id: str,
+        timeout_ms: int,
+        security_hint: Optional[str] = None,
     ):
         """Drain the per-cid queue until RESPONSE, returning a single
-        merged NormalizedMessage (data + errors + warnings)."""
+        merged NormalizedMessage (data + errors + warnings).
+
+        ``security_hint`` is plumbed to bar/tick normalisers, which need
+        a key to namespace their data under since the response doesn't
+        echo the request's security back.
+        """
         from blpremote_server.executor.normalize import (
             NormalizedMessage,
             normalize_message,
@@ -195,7 +218,7 @@ class BloombergExecutor:
                     f"timeout waiting for response: {correlation_id}"
                 )
 
-            norm = normalize_message(msg)
+            norm = normalize_message(msg, security_hint=security_hint)
             BloombergExecutor._merge_data(merged.data, norm.data)
             merged.errors.extend(norm.errors)
             merged.warnings.extend(norm.warnings)
