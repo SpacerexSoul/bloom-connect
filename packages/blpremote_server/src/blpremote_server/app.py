@@ -1,5 +1,7 @@
 """FastAPI application for Bloomberg remote execution."""
 
+import logging
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Optional
 
@@ -29,11 +31,66 @@ from blpremote_server.models import (
     LoginResponse,
     VersionResponse,
 )
+from blpremote_server.session_manager import (
+    BLPAPI_AVAILABLE,
+    SessionState,
+    get_manager,
+)
+
+logger = logging.getLogger(__name__)
+
+# Map SessionManager state -> top-level /health status string.
+_HEALTH_STATUS_BY_STATE = {
+    SessionState.CONNECTED: "healthy",
+    SessionState.STARTING: "degraded",
+    SessionState.DEGRADED: "degraded",
+    SessionState.RECONNECTING: "degraded",
+    SessionState.FAILED: "unavailable",
+    SessionState.STOPPED: "unavailable",
+    SessionState.SHUTTING_DOWN: "unavailable",
+    SessionState.UNINITIALIZED: "unavailable",
+}
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Start the long-lived blpapi session at boot, stop at shutdown.
+
+    If blpapi isn't installed we log and skip — /health will surface
+    `status=unavailable, bloomberg_connected=false` so the client side
+    can detect this without the server crashing.
+    """
+    mgr = get_manager()
+    if BLPAPI_AVAILABLE:
+        try:
+            mgr.start()
+            logger.info("bloomberg session started (state=%s)", mgr.state.value)
+        except Exception:
+            logger.exception(
+                "failed to start bloomberg session at boot — /health will "
+                "report unavailable until reconnect succeeds"
+            )
+    else:
+        logger.warning(
+            "blpapi not installed; running in mock-execute mode. "
+            "/health will report status=unavailable."
+        )
+    try:
+        yield
+    finally:
+        if BLPAPI_AVAILABLE:
+            try:
+                mgr.stop()
+                logger.info("bloomberg session stopped")
+            except Exception:
+                logger.exception("error stopping bloomberg session")
+
 
 app = FastAPI(
     title="Bloomberg Remote Server",
     description="Remote execution server for Bloomberg BLPAPI operations",
     version=__version__,
+    lifespan=lifespan,
 )
 
 # CORS middleware
@@ -98,13 +155,27 @@ async def get_current_user(
 # Health and version endpoints
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
-    """Check server health."""
-    # Try to detect if Bloomberg is available
-    import importlib.util
+    """Check server health.
 
-    bloomberg_available = importlib.util.find_spec("blpapi") is not None
-
-    return HealthResponse(status="healthy", bloomberg_connected=bloomberg_available)
+    Reflects the live SessionManager state — if Bloomberg Terminal
+    drops or bbcomm dies, this flips to ``degraded`` (during reconnect)
+    or ``unavailable`` (after reconnect gives up). It does NOT just
+    check whether the blpapi module is importable.
+    """
+    if not BLPAPI_AVAILABLE:
+        return HealthResponse(
+            status="unavailable",
+            bloomberg_connected=False,
+            session_state=None,
+        )
+    mgr = get_manager()
+    return HealthResponse(
+        status=_HEALTH_STATUS_BY_STATE.get(mgr.state, "unavailable"),
+        bloomberg_connected=mgr.is_connected(),
+        session_state=mgr.state.value,
+        last_reconnect_ts=mgr.last_reconnect_ts,
+        reconnect_attempts=mgr.reconnect_attempts,
+    )
 
 
 @app.get("/version", response_model=VersionResponse)

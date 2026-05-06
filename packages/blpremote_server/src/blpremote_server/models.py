@@ -105,8 +105,15 @@ class LoginResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
+    # "healthy" — session connected and serving requests
+    # "degraded" — session lost or reconnecting; requests will fail until restored
+    # "unavailable" — blpapi not installed or session never started
     status: str = "healthy"
     bloomberg_connected: bool = False
+    # Detailed session view (None when blpapi isn't installed):
+    session_state: Optional[str] = None
+    last_reconnect_ts: Optional[float] = None
+    reconnect_attempts: int = 0
 
 
 class VersionResponse(BaseModel):
