@@ -386,6 +386,78 @@ def get_ticks(
     return ticks if isinstance(ticks, list) else []
 
 
+def get_field_info(
+    host: RemoteHost,
+    field_ids: Union[str, list[str]],
+    with_documentation: bool = True,
+    timeout_ms: int = 30000,
+) -> dict[str, dict[str, Any]]:
+    """Bloomberg FieldInfoRequest — describe one or more BBG field IDs.
+
+    Wraps a ``FieldInfoRequest`` against ``//blp/apiflds`` and returns
+    the per-field metadata keyed by **mnemonic** (so a query for
+    ``["PX_LAST", "NAME"]`` comes back keyed exactly that way, not by
+    BBG's internal ``"PR005"`` style id).
+
+    Args:
+        host:                 Connected RemoteHost.
+        field_ids:            One field id/mnemonic, or a list.
+        with_documentation:   When True (default) the response includes
+                              the long-form ``documentation`` text. Set
+                              False when you only need the type/category
+                              and want a smaller payload.
+        timeout_ms:           Server-side response timeout.
+
+    Returns:
+        ``{"PX_LAST": {"mnemonic": "PX_LAST", "datatype": "Price",
+                       "description": "Last Price", "ftype": ...,
+                       "categoryName": ..., "property": ...,
+                       "overrides": [...], "documentation": "..."},
+           "NAME":    {... same shape ...}}``
+
+        Unknown field ids do not appear in this dict — they surface as
+        ``BLP_FIELD_INFO_ERROR`` entries on the underlying
+        ``ExecutionResult.errors``. To inspect those, call ``host.execute``
+        directly with the IR this function builds. The convenience
+        return prioritises the happy-path shape; for richer error
+        introspection use the lower-level path.
+
+    Example:
+        >>> info = get_field_info(host, ["PX_LAST", "NAME"])
+        >>> info["PX_LAST"]["datatype"]
+        'Price'
+    """
+    if isinstance(field_ids, str):
+        field_ids = [field_ids]
+
+    token = host._get_token()
+
+    ops: list = [
+        StartSessionOp(),
+        OpenServiceOp(service="//blp/apiflds"),
+        CreateRequestOp(
+            service="//blp/apiflds",
+            request="FieldInfoRequest",
+            id="req1",
+        ),
+    ]
+    for fid in field_ids:
+        ops.append(AppendOp(id="req1", path="id", value=fid))
+    ops.append(SetOp(
+        id="req1", path="returnFieldDocumentation", value=with_documentation,
+    ))
+    ops.extend([
+        SendRequestOp(id="req1", correlation_id="cid1"),
+        CollectResponseOp(correlation_id="cid1", timeout_ms=timeout_ms),
+    ])
+
+    plan = ExecutionPlan(auth=AuthToken(token=token), ops=ops)
+    result = host.execute(plan)
+
+    info = result.data.get("_field_info")
+    return info if isinstance(info, dict) else {}
+
+
 def get_returns_data(
     host: RemoteHost,
     securities: Union[str, list[str]],

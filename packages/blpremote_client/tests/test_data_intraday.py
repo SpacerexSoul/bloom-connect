@@ -1,4 +1,4 @@
-"""Tests for the intraday convenience funcs (get_bars, get_ticks).
+"""Tests for the intraday + field-info convenience funcs.
 
 These don't hit a live server. Each test injects a fake RemoteHost
 that captures the ExecutionPlan the function built and returns a
@@ -11,7 +11,12 @@ from typing import Any
 
 import pytest
 
-from blpremote_client.data import _format_datetime, get_bars, get_ticks
+from blpremote_client.data import (
+    _format_datetime,
+    get_bars,
+    get_field_info,
+    get_ticks,
+)
 from blpremote_client.models import (
     AppendOp,
     CollectResponseOp,
@@ -246,6 +251,93 @@ class TestGetTicks:
             datetime(2026, 5, 6, 14, 0, tzinfo=timezone.utc),
             datetime(2026, 5, 6, 14, 5, tzinfo=timezone.utc),
         )
+        collect = [op for op in host.captured_plan.ops if isinstance(op, CollectResponseOp)]
+        assert len(collect) == 1
+        assert collect[0].op == "collect_response"
+
+
+class TestGetFieldInfo:
+    def _ops_by_type(self, plan, op_cls):
+        return [op for op in plan.ops if isinstance(op, op_cls)]
+
+    def _canned_response(self, fields: list[str]) -> dict[str, Any]:
+        """Mimics the c3 server-side normaliser shape."""
+        return {
+            "_field_info": {
+                f: {
+                    "mnemonic": f,
+                    "datatype": "Price" if f == "PX_LAST" else "String",
+                    "description": f"description of {f}",
+                    "ftype": "Real Time",
+                    "categoryName": ["Market Data"],
+                    "property": [],
+                    "overrides": [],
+                    "documentation": f"long-form docs for {f}",
+                }
+                for f in fields
+            }
+        }
+
+    def test_builds_field_info_request_single_id(self):
+        host = _FakeHost(response_data=self._canned_response(["PX_LAST"]))
+        get_field_info(host, "PX_LAST")
+
+        plan = host.captured_plan
+        creates = self._ops_by_type(plan, CreateRequestOp)
+        assert len(creates) == 1
+        assert creates[0].service == "//blp/apiflds"
+        assert creates[0].request == "FieldInfoRequest"
+
+        opens = self._ops_by_type(plan, OpenServiceOp)
+        assert opens[0].service == "//blp/apiflds"
+
+        ids = [op.value for op in self._ops_by_type(plan, AppendOp) if op.path == "id"]
+        assert ids == ["PX_LAST"]
+
+        sets = {op.path: op.value for op in self._ops_by_type(plan, SetOp)}
+        assert sets["returnFieldDocumentation"] is True
+
+    def test_builds_field_info_request_multi_id(self):
+        host = _FakeHost(
+            response_data=self._canned_response(["PX_LAST", "NAME", "VOLUME"])
+        )
+        get_field_info(host, ["PX_LAST", "NAME", "VOLUME"])
+
+        ids = [
+            op.value for op in host.captured_plan.ops
+            if isinstance(op, AppendOp) and op.path == "id"
+        ]
+        assert ids == ["PX_LAST", "NAME", "VOLUME"]
+
+    def test_returns_field_info_keyed_by_mnemonic(self):
+        host = _FakeHost(response_data=self._canned_response(["PX_LAST", "NAME"]))
+        info = get_field_info(host, ["PX_LAST", "NAME"])
+        assert set(info.keys()) == {"PX_LAST", "NAME"}
+        assert info["PX_LAST"]["datatype"] == "Price"
+        assert info["NAME"]["datatype"] == "String"
+        assert "documentation" in info["PX_LAST"]
+
+    def test_with_documentation_false_propagates_to_ir(self):
+        host = _FakeHost(response_data=self._canned_response(["PX_LAST"]))
+        get_field_info(host, "PX_LAST", with_documentation=False)
+        sets = {op.path: op.value for op in host.captured_plan.ops if isinstance(op, SetOp)}
+        assert sets["returnFieldDocumentation"] is False
+
+    def test_returns_empty_dict_when_field_info_missing(self):
+        # Server-side might return an empty data dict if all fields
+        # are unknown — convenience func should not blow up.
+        host = _FakeHost(response_data={})
+        info = get_field_info(host, ["ZZZ_UNKNOWN"])
+        assert info == {}
+
+    def test_returns_empty_dict_when_field_info_not_a_dict(self):
+        host = _FakeHost(response_data={"_field_info": "oops not a dict"})
+        info = get_field_info(host, ["PX_LAST"])
+        assert info == {}
+
+    def test_collect_response_uses_new_op(self):
+        host = _FakeHost(response_data=self._canned_response(["PX_LAST"]))
+        get_field_info(host, "PX_LAST")
         collect = [op for op in host.captured_plan.ops if isinstance(op, CollectResponseOp)]
         assert len(collect) == 1
         assert collect[0].op == "collect_response"
