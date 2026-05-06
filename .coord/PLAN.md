@@ -18,7 +18,7 @@ file. Update the **Status** and **Branch** columns as work progresses.
 |----|----------------------------------------------------|-------|----------|--------|-------|
 | M0 | Tag current `main` as `legacy-v1`                  | mac   | done     | —      | tagged at the pre-M1 baseline |
 | M1 | Session lifecycle: long-lived + reconnect + honest `/health` + sub PoC | win   | done     | win/m1-session-lifecycle (merged f3a34f0) | both sides verified 2026-05-06; merged to main 2026-05-06 |
-| M2 | Generalize IR for all request types + schema cache | split | idle     |        | mac: client+tests · win: server+live verify · validator becomes trust boundary (LLM dep) · cache `SchemaRequest`/`FieldInfo` at first hit |
+| M2 | Generalize IR for all request types + schema cache | split | in-progress (mac) | mac/m2-client-ir | mac: client+tests · win: server+live verify · validator becomes trust boundary (LLM dep) · cache `SchemaRequest`/`FieldInfo` at first hit. Mac claimed 2026-05-06: starting with IR contract proposal (collect_response generalization + per-service schemas), then client surface (history/bars/ticks convenience + proxy generalization + tests). Awaits win lock on contract before server work. |
 | M3 | Streaming subscriptions over SSE                   | split | idle     |        | win: server · mac: client |
 | M4 | Request cache + structured logging + /metrics + JSONL audit | mac   | idle     |        | LRU+TTL · JSON logs · Prometheus · one-line-per-execute audit log (ts, user, req_id, compact IR, result hash, elapsed) |
 | M5 | Auth hardening (JWT secret, rate limits)           | mac   | idle     |        | env-driven secret, per-user limits |
