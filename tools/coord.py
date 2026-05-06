@@ -98,26 +98,59 @@ def _token(cfg: dict[str, str]) -> str:
     return _login(cfg)
 
 
-def _request(cfg: dict[str, str], method: str, path: str, body: dict | None = None, retry: bool = True) -> dict:
+class _TransientError(Exception):
+    """Network-level or transient HTTP error. Callers running in a
+    long-lived loop (e.g. ``watch``) should back off and retry rather
+    than die. One-shot callers re-raise as SystemExit."""
+
+
+def _request(
+    cfg: dict[str, str],
+    method: str,
+    path: str,
+    body: dict | None = None,
+    retry: bool = True,
+    raise_on_transient: bool = False,
+) -> dict:
+    # Long-poll inbox calls can sit up to ~25s server-side; allow margin.
+    timeout = 40 if "/v1/coord/inbox" in path and "wait_ms=" in path else 15
     url = cfg["url"] + path
-    headers = {"Authorization": f"Bearer {_token(cfg)}"}
     data: bytes | None = None
+    headers: dict[str, str] = {}
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    # Long-poll inbox calls can sit up to ~25s server-side; allow margin.
-    timeout = 40 if "/v1/coord/inbox" in path and "wait_ms=" in path else 15
     try:
+        # _token() may itself hit the network (login on cache miss), so
+        # the URLError handler below must cover it. Same try block.
+        headers["Authorization"] = f"Bearer {_token(cfg)}"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         if e.code == 401 and retry:
             TOKEN_FILE.unlink(missing_ok=True)
-            return _request(cfg, method, path, body, retry=False)
+            return _request(
+                cfg, method, path, body,
+                retry=False, raise_on_transient=raise_on_transient,
+            )
+        # 5xx, 502/503/504 from a proxy, gateway timeouts — all transient
+        # from a long-running watcher's POV. Same for any post-retry 401
+        # since it likely means the server is mid-restart with a fresh
+        # users.json that hasn't paired the new password yet.
+        if raise_on_transient:
+            raise _TransientError(f"HTTP {e.code}")
         sys.exit(f"HTTP {e.code}: {e.read().decode(errors='replace')}")
     except urllib.error.URLError as e:
+        # Connection refused, DNS, timeout, etc. — all transient.
+        if raise_on_transient:
+            raise _TransientError(f"connection: {e.reason}")
         sys.exit(f"connection error: {e.reason}")
+    except (TimeoutError, ConnectionError, OSError) as e:
+        # Belt-and-braces: anything socket/IO that escaped above.
+        if raise_on_transient:
+            raise _TransientError(f"io: {e}")
+        sys.exit(f"io error: {e}")
 
 
 def _read_body(args: argparse.Namespace) -> str:
@@ -178,6 +211,13 @@ def cmd_watch(args: argparse.Namespace) -> None:
     Old servers without long-poll support ignore the wait_ms query
     param and return immediately; we fall back to a sleep cadence in
     that case so we don't melt the network.
+
+    Resilient to transient outages: server restart, ngrok 502, DNS
+    flap, request timeout — all retried with exponential backoff
+    (1s -> 2s -> 4s -> ... capped at 30s). The watcher only exits on
+    KeyboardInterrupt; everything else just prints a single
+    ``[transient]`` notice to stderr and keeps going. This is the
+    contract Monitor depends on.
     """
     cfg = _load_config()
     print(
@@ -187,10 +227,27 @@ def cmd_watch(args: argparse.Namespace) -> None:
     )
     fallback_sleep = max(1, args.interval) if args.interval else 5
     saw_long_poll = False
+    backoff = 1.0
+    backoff_cap = 30.0
     try:
         while True:
             t0 = time.monotonic()
-            r = _request(cfg, "GET", f"/v1/coord/inbox?wait_ms={_LONG_POLL_MS}")
+            try:
+                r = _request(
+                    cfg, "GET",
+                    f"/v1/coord/inbox?wait_ms={_LONG_POLL_MS}",
+                    raise_on_transient=True,
+                )
+            except _TransientError as e:
+                print(
+                    f"[transient] {e} — retrying in {backoff:.0f}s",
+                    file=sys.stderr,
+                )
+                sys.stderr.flush()
+                time.sleep(backoff)
+                backoff = min(backoff * 2, backoff_cap)
+                continue
+            backoff = 1.0  # reset on success
             elapsed = time.monotonic() - t0
             # Heuristic: a real long-poll either returns immediately
             # (message landed) OR after ~25s. If the server returns
