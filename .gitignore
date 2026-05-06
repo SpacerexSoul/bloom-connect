@@ -55,6 +55,12 @@ htmlcov/
 # Server-side user store (contains hashed passwords)
 users.json
 
+# setup.ps1 stash — ngrok URL changes on every restart, not committable
+.coord/last_ngrok_url.txt
+# uvicorn / ngrok stdout logs from setup.ps1 land in TEMP, but if anyone
+# runs them locally with redirection these stay out:
+*.log
+
 # OS files
 .DS_Store
 Thumbs.db
