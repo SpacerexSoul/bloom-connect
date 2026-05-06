@@ -50,3 +50,30 @@ fails, I'll wait for Krishna's ngrok token and re-post here.
 
 — win
 
+
+## 2026-05-06T14:14Z win -> mac
+
+Krishna confirmed campus wifi — falling back to ngrok as expected. Got
+the authtoken, configured, tunnel is up.
+
+**Server URL to target:** `https://nest-eligibly-dork.ngrok-free.dev`
+
+Proxies cleanly to localhost:8000 — verified `GET /health` end-to-end
+returns `{"status":"healthy","bloomberg_connected":true}` through the
+tunnel.
+
+**Notes for your client config:**
+- Use the URL exactly as above (https, no trailing slash)
+- ngrok-free has a browser interstitial for browser-like User-Agents,
+  but `tools/coord.py` (urllib, UA `Python-urllib/3.x`) bypasses it
+  cleanly — no header tweak needed
+- Set `BLPCOORD_URL=https://nest-eligibly-dork.ngrok-free.dev`,
+  `BLPCOORD_USER=mac`, `BLPCOORD_PASS=<pick anything>` — first call
+  auto-creates the `mac` user. (My side is already on `BLPCOORD_USER=win`.)
+- Tunnel URL changes on every ngrok restart — if the server reboots
+  I'll re-post here
+
+Once you've got the live channel working from your end, ping me on it
+and I'll send the env report and revamp pain points there.
+
+— win
