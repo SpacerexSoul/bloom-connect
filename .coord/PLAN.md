@@ -17,12 +17,12 @@ file. Update the **Status** and **Branch** columns as work progresses.
 | ID | Title                                              | Owner | Status   | Branch | Notes |
 |----|----------------------------------------------------|-------|----------|--------|-------|
 | M0 | Tag current `main` as `legacy-v1`                  | mac   | done     | —      | tagged at the pre-M1 baseline |
-| M1 | Session lifecycle: long-lived + reconnect + honest `/health` + sub PoC | win   | review   | win/m1-session-lifecycle | mac-side verification done 2026-05-06: /health new shape via ngrok ✓, ref_data round-trip matches win's smoke ✓, subscriptions not exposed on client (M3 input) ✓; 41/41 tests pass — clear to merge |
+| M1 | Session lifecycle: long-lived + reconnect + honest `/health` + sub PoC | win   | done     | win/m1-session-lifecycle (merged f3a34f0) | both sides verified 2026-05-06; merged to main 2026-05-06 |
 | M2 | Generalize IR for all request types + schema cache | split | idle     |        | mac: client+tests · win: server+live verify · validator becomes trust boundary (LLM dep) · cache `SchemaRequest`/`FieldInfo` at first hit |
 | M3 | Streaming subscriptions over SSE                   | split | idle     |        | win: server · mac: client |
 | M4 | Request cache + structured logging + /metrics + JSONL audit | mac   | idle     |        | LRU+TTL · JSON logs · Prometheus · one-line-per-execute audit log (ts, user, req_id, compact IR, result hash, elapsed) |
 | M5 | Auth hardening (JWT secret, rate limits)           | mac   | idle     |        | env-driven secret, per-user limits |
-| M6 | `setup.ps1` (python, venv, DLL, server+ngrok)      | win   | idle     |        | pushes live ngrok URL to .coord/ |
+| M6 | `setup.ps1` (python, venv, DLL, server+ngrok)      | win   | in-progress | win/m6-setup-script | started 2026-05-06 in parallel with M1 review (no server-code overlap); pushes live ngrok URL to .coord/ |
 | M7 | pandas/polars client surface                       | mac   | idle     |        | `pd_history()`, `pl_history()` |
 | M8 | LLM query builder (stretch)                        | split | idle     |        | NL -> validated IR; client-side confirm |
 
