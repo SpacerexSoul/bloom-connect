@@ -106,8 +106,10 @@ def _request(cfg: dict[str, str], method: str, path: str, body: dict | None = No
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    # Long-poll inbox calls can sit up to ~25s server-side; allow margin.
+    timeout = 40 if "/v1/coord/inbox" in path and "wait_ms=" in path else 15
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         if e.code == 401 and retry:
@@ -137,7 +139,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     print(f"sent to {args.to} at {r['ts']}")
 
 
-def _print_messages(msgs: list[dict], as_json: bool) -> None:
+def _print_messages(msgs: list[dict], as_json: bool, with_marker: bool = False) -> None:
     if as_json:
         print(json.dumps(msgs, indent=2))
         return
@@ -145,6 +147,10 @@ def _print_messages(msgs: list[dict], as_json: bool) -> None:
         print("(empty)")
         return
     for m in msgs:
+        if with_marker:
+            # Single-line event header so external watchers (e.g. Monitor)
+            # can use line-as-event semantics. Body still printed below.
+            print(f"[NEW] {m['ts']} from={m['sender']} bytes={len(m['body'])}")
         print(f"--- {m['ts']} from {m['sender']} ---")
         print(m["body"].rstrip())
         print()
@@ -157,16 +163,47 @@ def cmd_inbox(args: argparse.Namespace) -> None:
     _print_messages(r["messages"], args.json)
 
 
+# Server caps long-poll at 30s; we ask for 25s to leave a comfortable
+# margin for proxy-level idle-timeout (ngrok is generous, but let's not
+# poke it).
+_LONG_POLL_MS = 25000
+
+
 def cmd_watch(args: argparse.Namespace) -> None:
+    """Long-poll the inbox and print each new message as it arrives.
+
+    The server blocks the request for up to ~25s waiting for a message.
+    On timeout the request returns empty and we immediately reconnect —
+    so a quiet hour is at most ~144 round-trips, vs ~720 at 5s polling.
+    Old servers without long-poll support ignore the wait_ms query
+    param and return immediately; we fall back to a sleep cadence in
+    that case so we don't melt the network.
+    """
     cfg = _load_config()
-    print(f"watching inbox for {cfg['user']} every {args.interval}s — ctrl-c to stop", file=sys.stderr)
+    print(
+        f"watching inbox for {cfg['user']} (long-poll {_LONG_POLL_MS}ms) "
+        "— ctrl-c to stop",
+        file=sys.stderr,
+    )
+    fallback_sleep = max(1, args.interval) if args.interval else 5
+    saw_long_poll = False
     try:
         while True:
-            r = _request(cfg, "GET", "/v1/coord/inbox")
+            t0 = time.monotonic()
+            r = _request(cfg, "GET", f"/v1/coord/inbox?wait_ms={_LONG_POLL_MS}")
+            elapsed = time.monotonic() - t0
+            # Heuristic: a real long-poll either returns immediately
+            # (message landed) OR after ~25s. If the server returns
+            # empty in <1s, it doesn't support wait_ms — fall back to
+            # polling cadence.
+            if not r["messages"] and elapsed < 1.0 and not saw_long_poll:
+                time.sleep(fallback_sleep)
+                continue
+            if elapsed >= 1.0:
+                saw_long_poll = True
             if r["messages"]:
-                _print_messages(r["messages"], args.json)
+                _print_messages(r["messages"], args.json, with_marker=True)
                 sys.stdout.flush()
-            time.sleep(args.interval)
     except KeyboardInterrupt:
         pass
 

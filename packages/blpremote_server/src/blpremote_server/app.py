@@ -258,12 +258,20 @@ async def coord_send(
     return CoordSendResponse(ts=msg["ts"])
 
 
+# Sync (not async) so the long-poll wait runs in FastAPI's threadpool and
+# doesn't block the event loop. wait_ms is capped server-side at 30s so a
+# misbehaving client can't pin a worker thread forever.
+_INBOX_MAX_WAIT_MS = 30000
+
+
 @app.get("/v1/coord/inbox", response_model=CoordInboxResponse)
-async def coord_inbox(
+def coord_inbox(
     peek: bool = False,
+    wait_ms: int = 0,
     username: str = Depends(get_current_user),
 ) -> CoordInboxResponse:
-    msgs = coord.drain(username, peek=peek)
+    wait_ms = max(0, min(wait_ms, _INBOX_MAX_WAIT_MS))
+    msgs = coord.drain(username, peek=peek, wait_ms=wait_ms)
     return CoordInboxResponse(
         user=username,
         messages=[CoordMessage(**m) for m in msgs],

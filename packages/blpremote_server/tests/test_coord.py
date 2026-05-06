@@ -1,5 +1,8 @@
 """Tests for the coord (cross-machine messaging) module."""
 
+import threading
+import time
+
 import pytest
 
 from blpremote_server import coord
@@ -71,3 +74,71 @@ class TestLimits:
         assert len(msgs) == coord.INBOX_MAX
         # Oldest entries dropped, newest retained
         assert msgs[-1]["body"] == str(coord.INBOX_MAX + 49)
+
+
+class TestLongPoll:
+    def test_wait_returns_immediately_when_inbox_has_messages(self):
+        coord.post(to="win", sender="mac", body="already here")
+        t0 = time.monotonic()
+        msgs = coord.drain("win", wait_ms=5000)
+        elapsed = time.monotonic() - t0
+        assert len(msgs) == 1
+        assert elapsed < 0.1  # should not have waited
+
+    def test_wait_returns_empty_after_timeout(self):
+        t0 = time.monotonic()
+        msgs = coord.drain("win", wait_ms=200)
+        elapsed = time.monotonic() - t0
+        assert msgs == []
+        assert 0.18 < elapsed < 0.5  # waited ~200ms
+
+    def test_wait_wakes_on_post_from_other_thread(self):
+        """Drain blocks on an empty inbox; a post from another thread
+        wakes it within a few ms."""
+        result: dict = {}
+
+        def waiter():
+            t0 = time.monotonic()
+            result["msgs"] = coord.drain("win", wait_ms=5000)
+            result["elapsed"] = time.monotonic() - t0
+
+        t = threading.Thread(target=waiter, daemon=True)
+        t.start()
+        time.sleep(0.05)  # let the waiter park on the condition
+        coord.post(to="win", sender="mac", body="ping")
+        t.join(timeout=2.0)
+
+        assert len(result["msgs"]) == 1
+        assert result["msgs"][0]["body"] == "ping"
+        # Wake should be near-instant after post; allow generous slack
+        # for CI scheduling jitter.
+        assert result["elapsed"] < 0.5
+
+    def test_wait_zero_means_no_blocking(self):
+        """wait_ms=0 (the default) keeps today's poll-and-return semantics."""
+        t0 = time.monotonic()
+        msgs = coord.drain("win", wait_ms=0)
+        elapsed = time.monotonic() - t0
+        assert msgs == []
+        assert elapsed < 0.05
+
+    def test_wait_only_wakes_intended_recipient(self):
+        """A post addressed to 'mac' must not wake a 'win' waiter."""
+        wake_record: dict = {}
+
+        def waiter():
+            t0 = time.monotonic()
+            wake_record["msgs"] = coord.drain("win", wait_ms=300)
+            wake_record["elapsed"] = time.monotonic() - t0
+
+        t = threading.Thread(target=waiter, daemon=True)
+        t.start()
+        time.sleep(0.05)
+        # Post to a different recipient — waiter should not return early.
+        coord.post(to="mac", sender="win", body="for mac")
+        t.join(timeout=1.0)
+
+        assert wake_record["msgs"] == []
+        # Should have waited the full timeout even though notify_all
+        # fired (recipient mismatch).
+        assert wake_record["elapsed"] >= 0.28
