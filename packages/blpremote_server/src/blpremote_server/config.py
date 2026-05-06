@@ -34,7 +34,7 @@ class Settings(BaseSettings):
 
     # Allowed services and request types
     allowed_services: list[str] = Field(
-        default=["//blp/refdata"],
+        default=["//blp/refdata", "//blp/apiflds"],
         description="Allowed Bloomberg services",
     )
     allowed_request_types: list[str] = Field(
@@ -43,6 +43,7 @@ class Settings(BaseSettings):
             "HistoricalDataRequest",
             "IntradayBarRequest",
             "IntradayTickRequest",
+            "FieldInfoRequest",
         ],
         description="Allowed request types",
     )
