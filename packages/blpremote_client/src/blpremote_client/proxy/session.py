@@ -169,7 +169,7 @@ class Session:
         # Add collect_response operation
         self._ops.append(
             {
-                "op": "collect_refdata_response",
+                "op": "collect_response",
                 "correlation_id": correlation_id,
                 "timeout_ms": timeout_ms,
             }

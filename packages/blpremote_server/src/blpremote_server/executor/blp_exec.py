@@ -24,6 +24,7 @@ from typing import Any, Optional
 from blpremote_server.exceptions import SessionError, TimeoutError
 from blpremote_server.models import (
     AppendOp,
+    CollectRefdataResponseOp,
     CollectResponseOp,
     CreateRequestOp,
     ErrorDetail,
@@ -57,6 +58,7 @@ class BloombergExecutor:
 
         start_time = time.time()
         errors: list[ErrorDetail] = []
+        warnings: list[ErrorDetail] = []
         data: dict[str, Any] = {}
 
         # Per-call state — never shared across concurrent execute() calls.
@@ -87,7 +89,18 @@ class BloombergExecutor:
                     self._send_request(
                         mgr, requests, op.id, op.correlation_id, registered_cids
                     )
-                elif isinstance(op, CollectResponseOp):
+                elif isinstance(op, (CollectResponseOp, CollectRefdataResponseOp)):
+                    if isinstance(op, CollectRefdataResponseOp):
+                        warnings.append(
+                            ErrorDetail(
+                                code="IR_DEPRECATED_OP",
+                                message=(
+                                    "Op 'collect_refdata_response' is deprecated; "
+                                    "use 'collect_response' instead. Removed in "
+                                    "protocol_version 1.2."
+                                ),
+                            )
+                        )
                     result_data, result_errors = self._collect_response(
                         mgr, op.correlation_id, op.timeout_ms
                     )
@@ -112,6 +125,7 @@ class BloombergExecutor:
             status=status,
             data=data,
             errors=errors,
+            warnings=warnings,
             server_timing_ms=elapsed_ms,
         )
 
@@ -264,6 +278,7 @@ class BloombergExecutor:
     def _mock_execute(plan: ExecutionPlan) -> ExecutionResult:
         start_time = time.time()
         data: dict[str, Any] = {}
+        warnings: list[ErrorDetail] = []
         securities: list[str] = []
         fields: list[str] = []
         for op in plan.ops:
@@ -272,6 +287,17 @@ class BloombergExecutor:
                     securities.append(str(op.value))
                 elif op.path == "fields":
                     fields.append(str(op.value))
+            elif isinstance(op, CollectRefdataResponseOp):
+                warnings.append(
+                    ErrorDetail(
+                        code="IR_DEPRECATED_OP",
+                        message=(
+                            "Op 'collect_refdata_response' is deprecated; "
+                            "use 'collect_response' instead. Removed in "
+                            "protocol_version 1.2."
+                        ),
+                    )
+                )
         for security in securities:
             data[security] = {}
             for field in fields:
@@ -289,6 +315,7 @@ class BloombergExecutor:
             status="ok",
             data=data,
             errors=[],
+            warnings=warnings,
             server_timing_ms=elapsed_ms,
         )
 

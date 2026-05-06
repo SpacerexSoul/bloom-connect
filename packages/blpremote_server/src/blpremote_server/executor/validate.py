@@ -4,11 +4,14 @@ from blpremote_server.config import settings
 from blpremote_server.exceptions import ValidationError
 from blpremote_server.models import (
     AppendOp,
+    CollectRefdataResponseOp,
     CollectResponseOp,
     CreateRequestOp,
     ExecutionPlan,
     OpenServiceOp,
 )
+
+SUPPORTED_PROTOCOL_VERSIONS = ("1.0", "1.1")
 
 
 def validate_plan(plan: ExecutionPlan) -> None:
@@ -17,6 +20,14 @@ def validate_plan(plan: ExecutionPlan) -> None:
 
     Raises ValidationError if the plan is invalid.
     """
+    # Reject unknown protocol versions early so a future-bumped client
+    # doesn't get silently misinterpreted by an older server.
+    if plan.protocol_version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise ValidationError(
+            f"Unsupported protocol_version '{plan.protocol_version}'. "
+            f"Supported: {', '.join(SUPPORTED_PROTOCOL_VERSIONS)}"
+        )
+
     # Track counts for limit validation
     security_count = 0
     field_count = 0
@@ -50,8 +61,8 @@ def validate_plan(plan: ExecutionPlan) -> None:
             elif op.path == "fields":
                 field_count += 1
 
-        # Validate timeout
-        elif isinstance(op, CollectResponseOp):
+        # Validate timeout (covers both the new op and the deprecated alias).
+        elif isinstance(op, (CollectResponseOp, CollectRefdataResponseOp)):
             max_timeout = min(plan.limits.max_timeout_ms, settings.max_timeout_ms)
             if op.timeout_ms > max_timeout:
                 raise ValidationError(f"Timeout {op.timeout_ms}ms exceeds maximum {max_timeout}ms")

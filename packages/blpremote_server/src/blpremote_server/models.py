@@ -44,6 +44,19 @@ class SendRequestOp(BaseModel):
 
 
 class CollectResponseOp(BaseModel):
+    # M2 r2: generic op replacing the misnamed `collect_refdata_response`.
+    # Routes to the same executor handler — the rename reflects that the
+    # handler already worked for HistoricalDataResponse too.
+    op: Literal["collect_response"] = "collect_response"
+    correlation_id: str
+    timeout_ms: int = 10000
+
+
+class CollectRefdataResponseOp(BaseModel):
+    # Deprecated alias kept for protocol_version="1.1". Retired in 1.2.
+    # Executor emits IR_DEPRECATED_OP into ExecutionResult.warnings when
+    # this is used. Same handler as CollectResponseOp — only the wire
+    # literal differs.
     op: Literal["collect_refdata_response"] = "collect_refdata_response"
     correlation_id: str
     timeout_ms: int = 10000
@@ -57,6 +70,7 @@ Op = Union[
     SetOp,
     SendRequestOp,
     CollectResponseOp,
+    CollectRefdataResponseOp,
 ]
 
 
@@ -71,7 +85,9 @@ class AuthToken(BaseModel):
 
 
 class ExecutionPlan(BaseModel):
-    protocol_version: str = "1.0"
+    # M2 r2: bumped default to "1.1". Server accepts "1.0" and "1.1";
+    # "1.2" will retire the deprecated `collect_refdata_response` alias.
+    protocol_version: str = "1.1"
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     auth: AuthToken
     ops: list[Op] = Field(default_factory=list)
@@ -90,6 +106,10 @@ class ExecutionResult(BaseModel):
     status: Literal["ok", "error", "partial"]
     data: dict[str, Any] = Field(default_factory=dict)
     errors: list[ErrorDetail] = Field(default_factory=list)
+    # M2 r2: advisory items that didn't materially affect the result —
+    # deprecated-op notices, unverified-service flags, schema fallbacks.
+    # Status calc is unchanged: warnings never affect status.
+    warnings: list[ErrorDetail] = Field(default_factory=list)
     server_timing_ms: Optional[int] = None
 
 

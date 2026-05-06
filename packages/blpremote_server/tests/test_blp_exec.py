@@ -396,3 +396,94 @@ def test_concurrent_execute_calls_dont_collide(started_manager, fake_blpapi):
     assert results["cid-A"].status == "ok"
     assert results["cid-B"].status == "ok"
     assert len(sess.sent_requests) == 2
+
+
+def test_deprecated_op_routes_and_emits_warning(started_manager, fake_blpapi):
+    """A plan using the deprecated `collect_refdata_response` alias must
+    still execute, but the result carries an IR_DEPRECATED_OP notice in
+    `warnings`."""
+    from blpremote_server.executor import execute_plan
+    from blpremote_server.models import (
+        AppendOp,
+        AuthToken,
+        CollectRefdataResponseOp,
+        CreateRequestOp,
+        ExecutionPlan,
+        OpenServiceOp,
+        SendRequestOp,
+        StartSessionOp,
+    )
+
+    sess = fake_blpapi.sessions[0]
+
+    plan = ExecutionPlan(
+        auth=AuthToken(token="t"),
+        ops=[
+            StartSessionOp(),
+            OpenServiceOp(service="//blp/refdata"),
+            CreateRequestOp(
+                service="//blp/refdata",
+                request="ReferenceDataRequest",
+                id="r1",
+            ),
+            AppendOp(id="r1", path="securities", value="AAPL US Equity"),
+            SendRequestOp(id="r1", correlation_id="cid-dep"),
+            CollectRefdataResponseOp(correlation_id="cid-dep", timeout_ms=2000),
+        ],
+    )
+
+    def fire_response_after_send():
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not sess.sent_requests:
+            time.sleep(0.005)
+        msg = _FakeMessage(cids=[_FakeCorrelationId("cid-dep")], elements={})
+        sess.fire(
+            type("E", (), {
+                "eventType": lambda self: _Event.RESPONSE,
+                "__iter__": lambda self: iter([msg]),
+            })()
+        )
+
+    t = threading.Thread(target=fire_response_after_send, daemon=True)
+    t.start()
+    result = execute_plan(plan)
+    t.join(timeout=2.0)
+
+    assert result.status == "ok"
+    # Errors path is unchanged for the deprecated alias.
+    assert result.errors == []
+    # Warnings path carries the deprecation notice.
+    assert len(result.warnings) == 1
+    assert result.warnings[0].code == "IR_DEPRECATED_OP"
+    assert "collect_refdata_response" in result.warnings[0].message
+    assert "1.2" in result.warnings[0].message  # mentions the retirement version
+
+
+def test_new_op_emits_no_warning(started_manager, fake_blpapi):
+    """The non-deprecated `collect_response` op must not emit any
+    deprecation warning (used here as a control)."""
+    from blpremote_server.executor import execute_plan
+
+    sess = fake_blpapi.sessions[0]
+
+    plan = _build_simple_plan()  # uses CollectResponseOp (the new op)
+
+    def fire_response_after_send():
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not sess.sent_requests:
+            time.sleep(0.005)
+        msg = _FakeMessage(cids=[_FakeCorrelationId("cid-aapl")], elements={})
+        sess.fire(
+            type("E", (), {
+                "eventType": lambda self: _Event.RESPONSE,
+                "__iter__": lambda self: iter([msg]),
+            })()
+        )
+
+    t = threading.Thread(target=fire_response_after_send, daemon=True)
+    t.start()
+    result = execute_plan(plan)
+    t.join(timeout=2.0)
+
+    assert result.status == "ok"
+    assert result.warnings == []

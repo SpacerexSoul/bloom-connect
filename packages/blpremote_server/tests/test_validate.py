@@ -6,6 +6,7 @@ from blpremote_server.executor.validate import validate_plan
 from blpremote_server.models import (
     AppendOp,
     AuthToken,
+    CollectRefdataResponseOp,
     CollectResponseOp,
     CreateRequestOp,
     ExecutionPlan,
@@ -144,4 +145,40 @@ class TestValidatePlan:
         plan = make_plan(ops, limits=PlanLimits(max_securities=10))
 
         with pytest.raises(ValidationError, match="Too many securities"):
+            validate_plan(plan)
+
+    def test_protocol_version_1_0_accepted(self):
+        plan = make_plan([StartSessionOp()])
+        plan.protocol_version = "1.0"
+        validate_plan(plan)  # should not raise
+
+    def test_protocol_version_1_1_accepted(self):
+        plan = make_plan([StartSessionOp()])
+        assert plan.protocol_version == "1.1"  # default
+        validate_plan(plan)  # should not raise
+
+    def test_unknown_protocol_version_rejected(self):
+        plan = make_plan([StartSessionOp()])
+        plan.protocol_version = "9.9"
+        with pytest.raises(ValidationError, match="protocol_version"):
+            validate_plan(plan)
+
+    def test_deprecated_collect_op_passes_validator(self):
+        """Validator must accept the deprecated alias for timeout checks
+        — the deprecation notice is emitted by the executor, not the
+        validator."""
+        ops = [
+            StartSessionOp(),
+            CollectRefdataResponseOp(correlation_id="cid1", timeout_ms=5000),
+        ]
+        plan = make_plan(ops)
+        validate_plan(plan)  # should not raise
+
+    def test_deprecated_collect_op_timeout_still_enforced(self):
+        ops = [
+            StartSessionOp(),
+            CollectRefdataResponseOp(correlation_id="cid1", timeout_ms=60000),
+        ]
+        plan = make_plan(ops)
+        with pytest.raises(ValidationError, match="Timeout"):
             validate_plan(plan)
