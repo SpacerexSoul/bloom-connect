@@ -17,7 +17,7 @@ file. Update the **Status** and **Branch** columns as work progresses.
 | ID | Title                                              | Owner | Status   | Branch | Notes |
 |----|----------------------------------------------------|-------|----------|--------|-------|
 | M0 | Tag current `main` as `legacy-v1`                  | mac   | done     | —      | tagged at the pre-M1 baseline |
-| M1 | Session lifecycle: long-lived + reconnect + honest `/health` + sub PoC | win   | idle     |        | hold session as app singleton; auto-reconnect w/ backoff; `/health` reflects real state; 30-line subscription lifecycle PoC inside M1 to de-risk M3 |
+| M1 | Session lifecycle: long-lived + reconnect + honest `/health` + sub PoC | win   | review   | win/m1-session-lifecycle | mac-side verification done 2026-05-06: /health new shape via ngrok ✓, ref_data round-trip matches win's smoke ✓, subscriptions not exposed on client (M3 input) ✓; 41/41 tests pass — clear to merge |
 | M2 | Generalize IR for all request types + schema cache | split | idle     |        | mac: client+tests · win: server+live verify · validator becomes trust boundary (LLM dep) · cache `SchemaRequest`/`FieldInfo` at first hit |
 | M3 | Streaming subscriptions over SSE                   | split | idle     |        | win: server · mac: client |
 | M4 | Request cache + structured logging + /metrics + JSONL audit | mac   | idle     |        | LRU+TTL · JSON logs · Prometheus · one-line-per-execute audit log (ts, user, req_id, compact IR, result hash, elapsed) |
@@ -41,6 +41,11 @@ file. Update the **Status** and **Branch** columns as work progresses.
   destructive migration), STOP and ping the other side via coord.
 - When you finish a milestone, update Status to `done` and post a
   message on coord linking the merge commit.
+- **Cross-boundary milestones require both-side verification before
+  `done`** (added 2026-05-06 after M1). Server-side green is not
+  enough; the client / Mac side must independently exercise the
+  contract and post results before the milestone flips from `review`
+  to `done`.
 
 ## Decisions (locked)
 
