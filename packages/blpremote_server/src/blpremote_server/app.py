@@ -141,12 +141,9 @@ async def _metrics_middleware(request: Request, call_next):
     import time as _time
     from blpremote_server.metrics import requests_total, request_duration
 
-    # Coarse endpoint label — strip query string so /v1/schema/{path:path}
-    # variants collapse to one series. We keep the path verb-by-verb so
-    # /v1/execute, /v1/subscribe, /v1/coord/send each get their own series.
-    endpoint = request.url.path
     started = _time.monotonic()
     status_label = "error"
+    response = None
     try:
         response = await call_next(request)
         status_label = (
@@ -157,6 +154,14 @@ async def _metrics_middleware(request: Request, call_next):
         return response
     finally:
         elapsed = _time.monotonic() - started
+        # Use the matched ROUTE TEMPLATE, not the captured path —
+        # otherwise /v1/schema/{service:path} would create a fresh
+        # series per service hit, blowing up Prometheus cardinality
+        # the moment we open the allowlist. Per-service breakdown
+        # already lives in schema_cache_hits/misses_total. Falls back
+        # to the raw URL path on 404s where no route matched.
+        route = request.scope.get("route")
+        endpoint = getattr(route, "path", None) or request.url.path
         try:
             request_duration.observe(elapsed, endpoint=endpoint)
             requests_total.inc(endpoint=endpoint, status=status_label)
