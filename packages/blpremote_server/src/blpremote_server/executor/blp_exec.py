@@ -261,9 +261,17 @@ class BloombergExecutor:
                     fe = field_exc.getValueAsElement(j)
                     field_id = fe.getElementAsString("fieldId")
                     err_info = fe.getElement("errorInfo")
+                    # Per M2 §2.3: code = BLP_FIELD_<CATEGORY> using the
+                    # category element on errorInfo (BAD_FLD,
+                    # NOT_APPLICABLE_TO_REF_DATA, etc.). Falls back to
+                    # BLP_FIELD_UNKNOWN if the field isn't present.
+                    if err_info.hasElement("category"):
+                        category = err_info.getElementAsString("category")
+                    else:
+                        category = "UNKNOWN"
                     errors.append(
                         ErrorDetail(
-                            code="BLP_FIELD_ERROR",
+                            code=f"BLP_FIELD_{category}",
                             message=err_info.getElementAsString("message"),
                             security=sec_name,
                             field=field_id,
