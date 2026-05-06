@@ -66,8 +66,25 @@ class SchemaCache:
     def get_or_warm(self, service_name: str) -> tuple[dict[str, Any], str]:
         cached = self.get(service_name)
         if cached is not None:
+            self._record_metric(hit=True, service=service_name)
             return cached
-        return self.warm(service_name)
+        result = self.warm(service_name)
+        self._record_metric(hit=False, service=service_name)
+        return result
+
+    @staticmethod
+    def _record_metric(*, hit: bool, service: str) -> None:
+        # Lazy-imported so an environment without the metrics module
+        # (theoretical edge case) doesn't crash the cache itself.
+        try:
+            from blpremote_server.metrics import (
+                schema_cache_hits_total,
+                schema_cache_misses_total,
+            )
+            counter = schema_cache_hits_total if hit else schema_cache_misses_total
+            counter.inc(service=service)
+        except Exception:
+            pass
 
     def invalidate(self, service_name: Optional[str] = None) -> None:
         """Drop one entry (or the whole cache if None). Wired into

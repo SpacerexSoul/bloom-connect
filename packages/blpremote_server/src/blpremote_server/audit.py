@@ -214,6 +214,13 @@ def audit_execute(
 
     # Structured logger picks the entry up via `extra=`.
     _audit_logger.info("execute", extra=entry)
+    # M4 (B): also bump the audit-lines counter for /metrics.
+    try:
+        from blpremote_server.metrics import audit_lines_total
+        audit_lines_total.inc()
+    except Exception:
+        # Metrics shouldn't ever throw, but if they do don't take down the audit.
+        pass
 
     # Optional file tee for offline grep / ingestion. We rebuild the
     # full JSON line here (logger-side `extra` flow is JSON-formatter

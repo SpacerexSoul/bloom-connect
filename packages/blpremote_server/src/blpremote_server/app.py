@@ -130,6 +130,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# M4 (B): per-request metrics middleware. Times every request and
+# records the outcome by endpoint + status. Long-lived /v1/subscribe
+# connections only land in metrics at disconnect (one observation per
+# connection); the per-frame events are out-of-scope for this counter
+# the same way they're out-of-scope for the audit log.
+@app.middleware("http")
+async def _metrics_middleware(request: Request, call_next):
+    import time as _time
+    from blpremote_server.metrics import requests_total, request_duration
+
+    # Coarse endpoint label — strip query string so /v1/schema/{path:path}
+    # variants collapse to one series. We keep the path verb-by-verb so
+    # /v1/execute, /v1/subscribe, /v1/coord/send each get their own series.
+    endpoint = request.url.path
+    started = _time.monotonic()
+    status_label = "error"
+    try:
+        response = await call_next(request)
+        status_label = (
+            "ok" if 200 <= response.status_code < 400
+            else "client_error" if 400 <= response.status_code < 500
+            else "server_error"
+        )
+        return response
+    finally:
+        elapsed = _time.monotonic() - started
+        try:
+            request_duration.observe(elapsed, endpoint=endpoint)
+            requests_total.inc(endpoint=endpoint, status=status_label)
+        except Exception:
+            logger.exception("metrics middleware bookkeeping failed")
+
 # Security
 security = HTTPBearer(auto_error=False)
 
@@ -210,6 +243,22 @@ async def health_check() -> HealthResponse:
 async def get_version() -> VersionResponse:
     """Get server version."""
     return VersionResponse(version=__version__)
+
+
+# M4 (B): Prometheus-format metrics. Bearer-auth required by default
+# so a server reachable over ngrok doesn't leak counters to the
+# internet at large; set BLPREMOTE_METRICS_REQUIRE_AUTH=false (a
+# future settings flag) for a private network deployment.
+@app.get("/metrics")
+async def metrics(
+    username: str = Depends(get_current_user),
+):
+    from blpremote_server.metrics import render_exposition
+
+    return Response(
+        content=render_exposition(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 # Schema introspection endpoint — bearer-auth, ETag/304, served from the
