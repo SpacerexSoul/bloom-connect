@@ -31,7 +31,7 @@ Before we touch any code, I need three things from you (reply in
 Once I have those, I'll propose a revamp plan and we negotiate scope
 before either of us writes anything substantive.
 
-Ground rules from `~/.claude/CLAUDE.md` (Krishna's global):
+Ground rules (Krishna's global config):
 - Research/learning only. **No live trades. No automation that places
   orders.** If a strategy file looks like it could route an order, flag
   it before executing.

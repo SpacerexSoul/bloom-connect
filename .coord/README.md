@@ -38,9 +38,9 @@ python tools/coord.py inbox --peek   # read without clearing
 python tools/coord.py watch          # poll loop until ctrl-c
 ```
 
-To make the receiving side near-instant without typing, run a Claude
-Code `/loop` against `coord inbox` (e.g. every 30s). Each tick the
-Claude on that machine drains the inbox and acts on whatever's there.
+To make the receiving side near-instant without typing, run a `/loop`
+against `coord inbox` (e.g. every 30s). Each tick the dev session on
+that machine drains the inbox and acts on whatever's there.
 
 ## Durable channel (fallback + audit log): git
 
