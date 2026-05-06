@@ -68,6 +68,14 @@ async def lifespan(_app: FastAPI):
     `status=unavailable, bloomberg_connected=false` so the client side
     can detect this without the server crashing.
     """
+    # M4: configure structured logging once per process. Uvicorn's
+    # default handlers stay; we just take over the root logger so
+    # extras flow through to JSON when configured.
+    from blpremote_server.logging_setup import configure_logging
+    configure_logging(
+        log_format=settings.log_format,
+        log_level=settings.log_level,
+    )
     mgr = get_manager()
     if BLPAPI_AVAILABLE:
         try:
@@ -294,28 +302,53 @@ async def execute(
     username: str = Depends(get_current_user),
 ) -> ExecutionResult:
     """Execute a validated Bloomberg execution plan."""
+    import time as _time
+    from blpremote_server.audit import audit_execute
+
+    request_started = _time.time()
     try:
         # Validate the plan
         validate_plan(plan)
 
         # Execute the plan
         result = execute_plan(plan)
+        elapsed_ms = int((_time.time() - request_started) * 1000)
+        try:
+            audit_execute(plan=plan, result=result, user=username, elapsed_ms=elapsed_ms)
+        except Exception:
+            logger.exception("audit_execute failed (logging only — request still served)")
         return result
 
     except PlanValidationError as e:
-        return ExecutionResult(
+        result = ExecutionResult(
             request_id=plan.request_id,
             status="error",
             data={},
             errors=[ErrorDetail(code=e.code, message=e.message)],
         )
+        try:
+            audit_execute(
+                plan=plan, result=result, user=username,
+                elapsed_ms=int((_time.time() - request_started) * 1000),
+            )
+        except Exception:
+            logger.exception("audit_execute failed (validation path)")
+        return result
     except Exception as e:
-        return ExecutionResult(
+        result = ExecutionResult(
             request_id=plan.request_id,
             status="error",
             data={},
             errors=[ErrorDetail(code="EXECUTION_FAILED", message=str(e))],
         )
+        try:
+            audit_execute(
+                plan=plan, result=result, user=username,
+                elapsed_ms=int((_time.time() - request_started) * 1000),
+            )
+        except Exception:
+            logger.exception("audit_execute failed (exception path)")
+        return result
 
 
 # SSE streaming subscription endpoint (M3).

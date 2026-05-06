@@ -54,6 +54,32 @@ class Settings(BaseSettings):
         description="Allowed IP addresses (empty = allow all)",
     )
 
+    # M4: observability + audit
+    log_format: str = Field(
+        default="text",
+        description="'text' (dev-friendly) or 'json' (structured for log shippers)",
+    )
+    log_level: str = Field(
+        default="INFO",
+        description="Root log level (DEBUG/INFO/WARNING/ERROR)",
+    )
+    audit_log_path: str = Field(
+        default="",
+        description=(
+            "Path to JSONL audit log. Empty = audit to the structured logger "
+            "instead (one entry per executed plan). Set to e.g. './audit.jsonl' "
+            "to also tee to a dedicated file for offline analysis."
+        ),
+    )
+    audit_include_raw_ir: bool = Field(
+        default=False,
+        description=(
+            "Include the raw IR ops list on every audit entry. Off by default "
+            "because lines bloat past 1KB on big plans. ir_hash is always "
+            "included so plans correlate even without the raw payload."
+        ),
+    )
+
     model_config = {
         "env_prefix": "BLPREMOTE_",
         "env_file": ".env",
