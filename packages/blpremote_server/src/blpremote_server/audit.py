@@ -187,12 +187,19 @@ def audit_execute(
     result: ExecutionResult,
     user: str,
     elapsed_ms: int,
+    cache_hit: bool = False,
 ) -> None:
     """Emit one audit entry for an executed plan.
 
     Always logs via the ``blpremote.audit`` logger. Additionally writes
     to ``settings.audit_log_path`` when set (tee). File-tee failures
     fall back to logger-only and emit a single warning per startup.
+
+    ``cache_hit`` is set by the M4(C) request-cache short-circuit so
+    grep-by-cache-hit on the audit log is straightforward (and so the
+    `elapsed_ms` field doesn't mislead — a cache-served result has
+    sub-ms latency that would otherwise look like an instrumented
+    fast path rather than a cache hit).
     """
     entry: dict[str, Any] = {
         "user": user,
@@ -204,6 +211,7 @@ def audit_execute(
         "status": result.status,
         "errors_count": len(result.errors),
         "warnings_count": len(result.warnings),
+        "cache_hit": cache_hit,
     }
     if result.errors:
         entry["error_codes"] = sorted({e.code for e in result.errors})

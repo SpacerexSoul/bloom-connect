@@ -221,6 +221,18 @@ schema_cache_misses_total = Counter(
 )
 REGISTRY.register(schema_cache_misses_total)
 
+request_cache_hits_total = Counter(
+    "blpremote_request_cache_hits_total",
+    "Plan executions served from the in-process LRU+TTL cache (no blpapi hit).",
+)
+REGISTRY.register(request_cache_hits_total)
+
+request_cache_misses_total = Counter(
+    "blpremote_request_cache_misses_total",
+    "Plan executions that fell through to a fresh blpapi execution.",
+)
+REGISTRY.register(request_cache_misses_total)
+
 
 def render_exposition() -> str:
     """Render the entire registry as Prometheus exposition text."""

@@ -358,15 +358,52 @@ async def execute(
     """Execute a validated Bloomberg execution plan."""
     import time as _time
     from blpremote_server.audit import audit_execute
+    from blpremote_server.metrics import (
+        request_cache_hits_total,
+        request_cache_misses_total,
+    )
+    from blpremote_server.request_cache import get_request_cache
 
     request_started = _time.time()
     try:
         # Validate the plan
         validate_plan(plan)
 
+        # M4(C): consult the LRU+TTL request cache before hitting blpapi.
+        cache = get_request_cache()
+        cached_result = cache.get(plan) if cache is not None else None
+        if cached_result is not None:
+            elapsed_ms = int((_time.time() - request_started) * 1000)
+            try:
+                request_cache_hits_total.inc()
+            except Exception:
+                pass
+            # Re-stamp the request_id so two callers running the same
+            # plan don't get back identical request_ids (would be
+            # confusing to chase in the audit log).
+            served = cached_result.model_copy(update={"request_id": plan.request_id})
+            try:
+                audit_execute(
+                    plan=plan, result=served, user=username,
+                    elapsed_ms=elapsed_ms, cache_hit=True,
+                )
+            except Exception:
+                logger.exception("audit_execute failed (cache-hit path)")
+            return served
+
+        try:
+            request_cache_misses_total.inc()
+        except Exception:
+            pass
+
         # Execute the plan
         result = execute_plan(plan)
         elapsed_ms = int((_time.time() - request_started) * 1000)
+        if cache is not None:
+            try:
+                cache.put(plan, result)
+            except Exception:
+                logger.exception("request cache put failed (logging only)")
         try:
             audit_execute(plan=plan, result=result, user=username, elapsed_ms=elapsed_ms)
         except Exception:

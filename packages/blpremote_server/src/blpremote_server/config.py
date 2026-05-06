@@ -79,6 +79,26 @@ class Settings(BaseSettings):
             "included so plans correlate even without the raw payload."
         ),
     )
+    request_cache_max_entries: int = Field(
+        default=1024,
+        description=(
+            "Maximum entries in the in-process request cache (LRU eviction). "
+            "Each entry is a small ExecutionResult; 1024 fits comfortably in "
+            "a few MB even for big response payloads."
+        ),
+    )
+    request_cache_ttl_s: float = Field(
+        default=5.0,
+        description=(
+            "Per-entry TTL for the request cache, in seconds. Default is "
+            "intentionally short — live BBG fields move within seconds, so a "
+            "wide TTL would serve stale prices. Set to 0 to disable caching "
+            "entirely. Plans with absolute timestamps (HistoricalDataRequest, "
+            "fixed-window IntradayBarRequest) hash identically across calls "
+            "and benefit from the cache. Plans with rolling 'last N minutes' "
+            "windows produce a fresh hash each call and never hit the cache."
+        ),
+    )
 
     model_config = {
         "env_prefix": "BLPREMOTE_",
