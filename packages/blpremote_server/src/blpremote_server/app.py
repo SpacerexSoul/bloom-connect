@@ -1,11 +1,12 @@
 """FastAPI application for Bloomberg remote execution."""
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -30,6 +31,11 @@ from blpremote_server.models import (
     LoginRequest,
     LoginResponse,
     VersionResponse,
+)
+from blpremote_server.schema_cache import (
+    SchemaCache,
+    get_schema_cache,
+    set_schema_cache,
 )
 from blpremote_server.session_manager import (
     BLPAPI_AVAILABLE,
@@ -70,6 +76,17 @@ async def lifespan(_app: FastAPI):
                 "failed to start bloomberg session at boot — /health will "
                 "report unavailable until reconnect succeeds"
             )
+        # Wire up SchemaCache once the session is alive (or attempted).
+        cache = SchemaCache(mgr)
+        set_schema_cache(cache)
+        if os.environ.get("BLPREMOTE_SCHEMA_PREWARM") == "1" and mgr.is_connected():
+            for svc_name in settings.allowed_services:
+                try:
+                    cache.warm(svc_name)
+                except Exception:
+                    logger.warning(
+                        "schema prewarm failed for %s", svc_name, exc_info=True
+                    )
     else:
         logger.warning(
             "blpapi not installed; running in mock-execute mode. "
@@ -78,6 +95,7 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        set_schema_cache(None)
         if BLPAPI_AVAILABLE:
             try:
                 mgr.stop()
@@ -182,6 +200,62 @@ async def health_check() -> HealthResponse:
 async def get_version() -> VersionResponse:
     """Get server version."""
     return VersionResponse(version=__version__)
+
+
+# Schema introspection endpoint — bearer-auth, ETag/304, served from the
+# in-process SchemaCache rather than firing an IR plan. Per M2 contract
+# §5.1, this path is excluded from the M4 audit log because it is a
+# read-only metadata lookup, not a business operation.
+@app.get("/v1/schema/{service:path}", response_model=None)
+async def get_schema(
+    service: str,
+    response: Response,
+    if_none_match: Optional[str] = Header(default=None, alias="If-None-Match"),
+    username: str = Depends(get_current_user),
+):
+    """Return cached schema for a Bloomberg service.
+
+    The path captures everything after ``/v1/schema/``. Clients should
+    URL-encode service names containing slashes (e.g.
+    ``//blp/refdata`` -> ``%2F%2Fblp%2Frefdata``) so the captured
+    value preserves both leading slashes.
+    """
+    if not BLPAPI_AVAILABLE:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="blpapi not available on this server",
+        )
+    # FastAPI's path converter strips a single leading slash; restore
+    # it so '//blp/refdata' arrives intact even if the client only
+    # encoded one of the slashes.
+    if not service.startswith("//"):
+        service = "/" + service if service.startswith("/") else "//" + service
+    if service not in settings.allowed_services:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Service '{service}' is not allowed. "
+            f"Allowed: {settings.allowed_services}",
+        )
+    cache = get_schema_cache()
+    if cache is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="schema cache not initialised",
+        )
+    try:
+        data, etag = cache.get_or_warm(service)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"failed to introspect schema: {e}",
+        )
+    if if_none_match == etag:
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers={"ETag": etag},
+        )
+    response.headers["ETag"] = etag
+    return data
 
 
 # Authentication endpoints
