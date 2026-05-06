@@ -455,7 +455,76 @@ def get_field_info(
     result = host.execute(plan)
 
     info = result.data.get("_field_info")
-    return info if isinstance(info, dict) else {}
+    if not isinstance(info, dict):
+        return {}
+    # Server-side normaliser duplicates the mnemonic in the body since
+    # it's already the dict key. Drop it client-side for a cleaner shape.
+    return {
+        k: {kk: vv for kk, vv in v.items() if kk != "mnemonic"}
+        if isinstance(v, dict) else v
+        for k, v in info.items()
+    }
+
+
+# Process-local cache for get_service_schema. Entry: service -> (etag, body).
+# Bounded by the number of distinct services a single client touches in a
+# session — typically <10. Cleared on process exit; not durable across
+# runs (intentional — schemas change rarely but a stale cache across a
+# Terminal restart is not worth the persistence complexity).
+_SCHEMA_CACHE: dict[str, tuple[str, dict[str, Any]]] = {}
+
+
+def get_service_schema(
+    host: RemoteHost,
+    service: str,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Fetch a Bloomberg service schema with client-side ETag caching.
+
+    First call for ``service`` GETs ``/v1/schema/{service}`` and caches
+    ``(etag, body)``. Subsequent calls send ``If-None-Match`` and either:
+
+    - return the cached body on 304 (server says unchanged), or
+    - replace the cache entry on 200 (schema actually changed).
+
+    Pass ``force=True`` to bypass the cache.
+
+    Args:
+        host:     Connected RemoteHost.
+        service:  Bloomberg service name (e.g. ``"//blp/refdata"``).
+                  We percent-encode internally so the slashes survive
+                  the FastAPI path converter.
+        force:    Skip cache, always do a fresh fetch.
+
+    Returns:
+        ``{"service": "//blp/refdata", "operations": [{name, ...}, ...]}``
+
+    Example:
+        >>> schema = get_service_schema(host, "//blp/refdata")
+        >>> [op["name"] for op in schema["operations"][:3]]
+        ['ReferenceDataRequest', 'HistoricalDataRequest', 'IntradayBarRequest']
+    """
+    cached = _SCHEMA_CACHE.get(service) if not force else None
+    cached_etag = cached[0] if cached else None
+
+    body, etag = host.get_schema(service, etag=cached_etag)
+
+    if body is None:
+        # 304 — return cached body; refresh ETag if the server sent a new one.
+        if cached is None:
+            # Shouldn't happen (304 without prior cache means we sent
+            # an If-None-Match that we didn't have in our table). If
+            # it does, fall back to a forced fetch.
+            return get_service_schema(host, service, force=True)
+        if etag and etag != cached[0]:
+            _SCHEMA_CACHE[service] = (etag, cached[1])
+        return cached[1]
+
+    # 200 — fresh body. Cache only if the server gave us an ETag.
+    if etag:
+        _SCHEMA_CACHE[service] = (etag, body)
+    return body
 
 
 def get_returns_data(

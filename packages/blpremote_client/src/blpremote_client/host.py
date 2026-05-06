@@ -72,6 +72,52 @@ class RemoteHost:
         except httpx.HTTPError as e:
             raise ConnectionError(f"Version check failed: {e}") from e
 
+    def get_schema(
+        self,
+        service: str,
+        etag: Optional[str] = None,
+    ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        """Fetch a Bloomberg service schema from the server's SchemaCache.
+
+        Bearer-authenticated. Returns ``(body, etag)``:
+
+        - ``body`` is the parsed schema dict (``{"service", "operations"}``)
+          on a fresh fetch, or ``None`` if the server returned 304.
+        - ``etag`` is the response ETag — always set on 200 and 304;
+          callers should hand it back on the next call to short-circuit.
+
+        Path encoding: the FastAPI handler captures everything after
+        ``/v1/schema/`` and restores a leading ``//`` if only one
+        survives. We always percent-encode here so a service like
+        ``//blp/refdata`` round-trips as ``%2F%2Fblp%2Frefdata``.
+        """
+        from urllib.parse import quote
+
+        token = self._get_token()
+        encoded = quote(service, safe="")
+        headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
+        if etag:
+            headers["If-None-Match"] = etag
+        try:
+            response = self._client.get(
+                f"{self.host}/v1/schema/{encoded}", headers=headers
+            )
+            if response.status_code == 304:
+                return None, response.headers.get("ETag", etag)
+            if response.status_code == 401:
+                self._token_manager.clear_token()
+                raise AuthenticationError("Token expired or invalid")
+            response.raise_for_status()
+            return response.json(), response.headers.get("ETag")
+        except httpx.ConnectError as e:
+            raise ConnectionError(
+                f"Cannot connect to {self.host}", host=self.host
+            ) from e
+        except httpx.HTTPStatusError as e:
+            raise ConnectionError(
+                f"Schema fetch failed: HTTP {e.response.status_code}"
+            ) from e
+
     def execute(self, plan: ExecutionPlan) -> ExecutionResult:
         """Execute a plan on the remote host."""
         try:

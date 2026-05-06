@@ -317,6 +317,17 @@ class TestGetFieldInfo:
         assert info["NAME"]["datatype"] == "String"
         assert "documentation" in info["PX_LAST"]
 
+    def test_strips_redundant_mnemonic_from_body(self):
+        """The server-side normaliser duplicates the mnemonic in the
+        body since it's already the dict key. Client-side surfaces
+        drop it for a cleaner shape."""
+        host = _FakeHost(response_data=self._canned_response(["PX_LAST", "NAME"]))
+        info = get_field_info(host, ["PX_LAST", "NAME"])
+        for k, v in info.items():
+            assert "mnemonic" not in v, f"mnemonic should be stripped from {k} body"
+            # But the key still IS the mnemonic — that's the contract.
+            assert k in {"PX_LAST", "NAME"}
+
     def test_with_documentation_false_propagates_to_ir(self):
         host = _FakeHost(response_data=self._canned_response(["PX_LAST"]))
         get_field_info(host, "PX_LAST", with_documentation=False)
