@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from blpremote_server import __version__
+from blpremote_server import __version__, coord
 from blpremote_server.auth import (
     create_access_token,
     user_store,
@@ -17,6 +17,10 @@ from blpremote_server.config import settings
 from blpremote_server.exceptions import ValidationError as PlanValidationError
 from blpremote_server.executor import execute_plan, validate_plan
 from blpremote_server.models import (
+    CoordInboxResponse,
+    CoordMessage,
+    CoordSendRequest,
+    CoordSendResponse,
     ErrorDetail,
     ExecutionPlan,
     ExecutionResult,
@@ -165,6 +169,34 @@ async def execute(
             data={},
             errors=[ErrorDetail(code="EXECUTION_FAILED", message=str(e))],
         )
+
+
+# Coordination channel — cross-machine messaging for paired dev sessions
+@app.post("/v1/coord/send", response_model=CoordSendResponse)
+async def coord_send(
+    payload: CoordSendRequest,
+    username: str = Depends(get_current_user),
+) -> CoordSendResponse:
+    try:
+        msg = coord.post(to=payload.to, sender=username, body=payload.body)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(e),
+        )
+    return CoordSendResponse(ts=msg["ts"])
+
+
+@app.get("/v1/coord/inbox", response_model=CoordInboxResponse)
+async def coord_inbox(
+    peek: bool = False,
+    username: str = Depends(get_current_user),
+) -> CoordInboxResponse:
+    msgs = coord.drain(username, peek=peek)
+    return CoordInboxResponse(
+        user=username,
+        messages=[CoordMessage(**m) for m in msgs],
+    )
 
 
 # Admin endpoint to create users (optional, for setup)

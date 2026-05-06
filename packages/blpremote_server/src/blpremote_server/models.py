@@ -112,3 +112,25 @@ class HealthResponse(BaseModel):
 class VersionResponse(BaseModel):
     version: str
     protocol_version: str = "1.0"
+
+
+class CoordSendRequest(BaseModel):
+    to: str = Field(min_length=1, max_length=64)
+    body: str
+
+
+class CoordMessage(BaseModel):
+    sender: str
+    to: str
+    body: str
+    ts: str
+
+
+class CoordInboxResponse(BaseModel):
+    user: str
+    messages: list[CoordMessage]
+
+
+class CoordSendResponse(BaseModel):
+    ok: bool = True
+    ts: str

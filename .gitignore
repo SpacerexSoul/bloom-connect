@@ -52,6 +52,9 @@ htmlcov/
 # Token storage (client side)
 .blpremote/
 
+# Server-side user store (contains hashed passwords)
+users.json
+
 # OS files
 .DS_Store
 Thumbs.db
