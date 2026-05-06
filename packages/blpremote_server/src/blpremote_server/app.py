@@ -6,8 +6,9 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from blpremote_server import __version__, coord
@@ -42,6 +43,7 @@ from blpremote_server.session_manager import (
     SessionState,
     get_manager,
 )
+from blpremote_server.sse import stream_subscription
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +316,43 @@ async def execute(
             data={},
             errors=[ErrorDetail(code="EXECUTION_FAILED", message=str(e))],
         )
+
+
+# SSE streaming subscription endpoint (M3).
+@app.get("/v1/subscribe")
+async def subscribe(
+    topic: str = Query(..., description="Bloomberg security e.g. 'AAPL US Equity'"),
+    fields: str = Query(..., description="Comma-separated field list e.g. 'LAST_PRICE,BID,ASK'"),
+    options: str = Query("", description="Optional blpapi subscription options string"),
+    username: str = Depends(get_current_user),
+):
+    """Stream live Bloomberg subscription events as Server-Sent Events.
+
+    One subscription per connection. Disconnecting (client closes the
+    stream) unsubscribes cleanly. Heartbeat ``ping`` events fire every
+    ~25s during silent periods to keep proxies from idling-out the
+    connection.
+    """
+    if not BLPAPI_AVAILABLE:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="blpapi not available on this server",
+        )
+    field_list = [f.strip() for f in fields.split(",") if f.strip()]
+    if not field_list:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="fields query param must contain at least one field",
+        )
+    mgr = get_manager()
+    return StreamingResponse(
+        stream_subscription(mgr, topic=topic, fields=field_list, options=options),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx response buffering
+        },
+    )
 
 
 # Coordination channel — cross-machine messaging for paired dev sessions
