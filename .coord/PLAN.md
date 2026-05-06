@@ -22,7 +22,7 @@ file. Update the **Status** and **Branch** columns as work progresses.
 | M3 | Streaming subscriptions over SSE                   | split | idle     |        | win: server · mac: client |
 | M4 | Request cache + structured logging + /metrics + JSONL audit | mac   | idle     |        | LRU+TTL · JSON logs · Prometheus · one-line-per-execute audit log (ts, user, req_id, compact IR, result hash, elapsed) |
 | M5 | Auth hardening (JWT secret, rate limits)           | mac   | idle     |        | env-driven secret, per-user limits |
-| M6 | `setup.ps1` (python, venv, DLL, server+ngrok)      | win   | in-progress | win/m6-setup-script | started 2026-05-06 in parallel with M1 review (no server-code overlap); pushes live ngrok URL to .coord/ |
+| M6 | `setup.ps1` (python, venv, DLL, server+ngrok)      | win   | review   | merged via main (d9691ec) | One-shot idempotent bring-up; -CoordSend mac auto-posts the new ngrok URL on the live channel after each restart, killing the "did you remember to update the URL" friction. Short-circuit path verified by win against running setup. Full bring-up end-to-end pending a clean-checkout run (would have stomped win's running server during dev). Mac-side review: code reads clean — Python find dodges MS Store alias trap, blpapi DLL path registered, port-free + uvicorn detached + /health gate before ngrok, ngrok URL polled from local 4040 API. Flips to `done` after a clean-machine end-to-end OR observed `-CoordSend mac` URL post in the wild. |
 | M7 | pandas/polars client surface                       | mac   | idle     |        | `pd_history()`, `pl_history()` |
 | M8 | LLM query builder (stretch)                        | split | idle     |        | NL -> validated IR; client-side confirm |
 
