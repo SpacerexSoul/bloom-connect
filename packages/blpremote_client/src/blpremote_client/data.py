@@ -1,6 +1,6 @@
 """Extended Bloomberg data functions for historical and bulk data requests."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Optional, Union
 
 from blpremote_client.host import RemoteHost
@@ -26,6 +26,23 @@ def _format_date(d: Union[str, date, datetime]) -> str:
     if isinstance(d, date):
         return d.strftime("%Y%m%d")
     return str(d)
+
+
+def _format_datetime(d: Union[str, datetime]) -> str:
+    """Format a datetime for Bloomberg intraday requests.
+
+    BBG accepts ISO-8601 with timezone for ``startDateTime``/``endDateTime``.
+    Naive datetimes are treated as UTC since intraday endpoints reject
+    ambiguous timestamps. Strings are passed through verbatim — useful
+    when the caller already has a BBG-formatted string.
+    """
+    if isinstance(d, str):
+        return d
+    if isinstance(d, datetime):
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d.replace(microsecond=0).isoformat()
+    raise TypeError(f"expected datetime or str, got {type(d).__name__}")
 
 
 def bdh(
@@ -234,6 +251,139 @@ def get_historical_prices(
     """
     field = "PX_LAST" if adjusted else "PX_CLOSE"
     return bdh(host, securities, field, start_date, end_date, timeout_ms=timeout_ms)
+
+
+def get_bars(
+    host: RemoteHost,
+    security: str,
+    event_type: str,
+    start: Union[str, datetime],
+    end: Union[str, datetime],
+    interval: int = 1,
+    timeout_ms: int = 30000,
+) -> list[dict[str, Any]]:
+    """Bloomberg IntradayBarRequest — return one record per bar.
+
+    Wraps an ``IntradayBarRequest`` against ``//blp/refdata`` and reshapes
+    the server response into a list of ``{time, open, high, low, close,
+    volume, numEvents, value}`` records.
+
+    Args:
+        host:        Connected RemoteHost.
+        security:    Bloomberg ticker (e.g. ``"AAPL US Equity"``).
+        event_type:  ``"TRADE"``, ``"BID"``, ``"ASK"``, ``"BEST_BID"`` etc.
+        start, end:  Window bounds. ``datetime`` or ISO-8601 string;
+                     naive datetimes are treated as UTC.
+        interval:    Bar size in minutes (1, 5, 15, 60, ...).
+        timeout_ms:  Server-side response timeout.
+
+    Returns:
+        ``[{"time": "2026-05-06T16:29:00", "open": 286, "high": 286,
+            "low": 286, "close": 286, "volume": 60545,
+            "numEvents": 637, "value": 17331926}, ...]``
+
+        Empty list if BBG returned no bars in the window. Inspect
+        ``host`` server-side errors via the underlying ``execute()`` call
+        if you need them — this convenience wrapper trades errors for
+        a clean shape.
+
+    Example:
+        >>> from datetime import datetime, timedelta, timezone
+        >>> end = datetime.now(timezone.utc).replace(microsecond=0)
+        >>> start = end - timedelta(minutes=30)
+        >>> bars = get_bars(host, "AAPL US Equity", "TRADE", start, end, interval=1)
+        >>> bars[0]["close"]
+        286
+    """
+    token = host._get_token()
+
+    ops = [
+        StartSessionOp(),
+        OpenServiceOp(service="//blp/refdata"),
+        CreateRequestOp(
+            service="//blp/refdata",
+            request="IntradayBarRequest",
+            id="req1",
+        ),
+        SetOp(id="req1", path="security", value=security),
+        SetOp(id="req1", path="eventType", value=event_type),
+        SetOp(id="req1", path="interval", value=interval),
+        SetOp(id="req1", path="startDateTime", value=_format_datetime(start)),
+        SetOp(id="req1", path="endDateTime", value=_format_datetime(end)),
+        SendRequestOp(id="req1", correlation_id="cid1"),
+        CollectResponseOp(correlation_id="cid1", timeout_ms=timeout_ms),
+    ]
+
+    plan = ExecutionPlan(auth=AuthToken(token=token), ops=ops)
+    result = host.execute(plan)
+
+    # Server-side normaliser keys bar lists by security name.
+    bars = result.data.get(security)
+    return bars if isinstance(bars, list) else []
+
+
+def get_ticks(
+    host: RemoteHost,
+    security: str,
+    event_types: Union[str, list[str]],
+    start: Union[str, datetime],
+    end: Union[str, datetime],
+    timeout_ms: int = 30000,
+) -> list[dict[str, Any]]:
+    """Bloomberg IntradayTickRequest — return one record per tick.
+
+    Args:
+        host:         Connected RemoteHost.
+        security:     Bloomberg ticker.
+        event_types:  Single event type or list — ``"TRADE"``, ``"BID"``,
+                      ``"ASK"``, ``"BEST_BID"``, ``"BEST_ASK"``.
+        start, end:   Window bounds. ``datetime`` or ISO-8601; naive
+                      datetimes treated as UTC.
+        timeout_ms:   Server-side response timeout.
+
+    Returns:
+        ``[{"time": "2026-05-06T16:29:00.123", "type": "TRADE",
+            "value": 286.05, "size": 100, ...}, ...]``
+
+        Empty list if BBG returned no ticks. Tick density varies — a
+        liquid name in trading hours can produce thousands per minute,
+        so keep windows narrow.
+
+    Example:
+        >>> ticks = get_ticks(host, "AAPL US Equity", "TRADE",
+        ...                   start, end)
+        >>> sum(t["size"] for t in ticks)
+        125_300
+    """
+    if isinstance(event_types, str):
+        event_types = [event_types]
+
+    token = host._get_token()
+
+    ops: list = [
+        StartSessionOp(),
+        OpenServiceOp(service="//blp/refdata"),
+        CreateRequestOp(
+            service="//blp/refdata",
+            request="IntradayTickRequest",
+            id="req1",
+        ),
+        SetOp(id="req1", path="security", value=security),
+    ]
+    for et in event_types:
+        ops.append(AppendOp(id="req1", path="eventTypes", value=et))
+    ops.extend([
+        SetOp(id="req1", path="startDateTime", value=_format_datetime(start)),
+        SetOp(id="req1", path="endDateTime", value=_format_datetime(end)),
+        SendRequestOp(id="req1", correlation_id="cid1"),
+        CollectResponseOp(correlation_id="cid1", timeout_ms=timeout_ms),
+    ])
+
+    plan = ExecutionPlan(auth=AuthToken(token=token), ops=ops)
+    result = host.execute(plan)
+
+    ticks = result.data.get(security)
+    return ticks if isinstance(ticks, list) else []
 
 
 def get_returns_data(
