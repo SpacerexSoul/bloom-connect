@@ -30,6 +30,17 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+# Force UTF-8 on stdout/stderr so Windows cp1252 doesn't crash printing
+# Unicode in messages (em-dash, →, smart quotes). Without this, an inbox
+# drain crashes mid-print AFTER the server has already cleared the queue,
+# losing the message.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 CFG_DIR = Path.home() / ".blpremote"
 TOKEN_FILE = CFG_DIR / "coord_token.json"
 CONFIG_FILE = CFG_DIR / "coord.json"
