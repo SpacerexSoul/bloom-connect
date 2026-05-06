@@ -1,0 +1,44 @@
+{
+  "_meta": {
+    "phase": 1,
+    "source": "synthesised from blpapi documentation; not captured live",
+    "schema_negotiated_in": "docs/M2_IR_CONTRACT.md §5 Q4",
+    "to_be_replaced_by": "phase-2 capture once live-BBG authorisation lands on win side",
+    "represents": "ReferenceDataResponse for AAPL US Equity asking for [PX_LAST, NAME, NOT_A_REAL_FIELD, NOT_APPLICABLE_FIELD]"
+  },
+  "ReferenceDataResponse": {
+    "securityData": [
+      {
+        "security": "AAPL US Equity",
+        "eidData": [],
+        "sequenceNumber": 0,
+        "fieldExceptions": [
+          {
+            "fieldId": "NOT_A_REAL_FIELD",
+            "errorInfo": {
+              "source": "9::bbdbh1",
+              "code": 5,
+              "category": "BAD_FLD",
+              "subcategory": "INVALID_FIELD",
+              "message": "Field not valid"
+            }
+          },
+          {
+            "fieldId": "NOT_APPLICABLE_FIELD",
+            "errorInfo": {
+              "source": "9::bbdbh1",
+              "code": 9,
+              "category": "NOT_APPLICABLE_TO_REF_DATA",
+              "subcategory": "INVALID_FIELD",
+              "message": "Field not applicable to security"
+            }
+          }
+        ],
+        "fieldData": {
+          "PX_LAST": 285.0,
+          "NAME": "APPLE INC"
+        }
+      }
+    ]
+  }
+}

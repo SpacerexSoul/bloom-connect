@@ -1,12 +1,13 @@
-# M2 — IR Contract Proposal
+# M2 — IR Contract
 
-> Author: mac · 2026-05-06 · Branch: `mac/m2-client-ir`
+> Authors: mac (proposal), win (review) · 2026-05-06 · Branch: `mac/m2-client-ir`
 >
-> Status: **DRAFT — awaiting win review on coord channel**
+> Status: **LOCKED 2026-05-06 — implementation may begin**
 >
-> Scope: lock the IR contract for "anything `blpapi` can do" before
-> either side starts implementation. Nothing in this doc is canonical
-> until win acks.
+> Scope: defines the IR contract for "anything `blpapi` can do".
+> Negotiated via coord on 2026-05-06; both sides have signed off.
+> Subsequent edits should bump `## Revision history` at the bottom
+> and ping coord.
 
 ---
 
@@ -50,11 +51,13 @@ request type. The actual gaps are narrower than the M2 title implies:
 - Add `CollectResponseOp` with wire literal `"collect_response"` (same
   fields: `correlation_id`, `timeout_ms`).
 - Keep `CollectRefdataResponseOp` (wire literal `"collect_refdata_response"`)
-  as a deprecated alias for one minor version. Validator emits a warning
-  in the response `errors` list with code `IR_DEPRECATED_OP` (status stays
-  `ok`/`partial`).
+  as a deprecated alias for one minor version. Validator emits a
+  notice in the response `warnings` list (see §2.6) with code
+  `IR_DEPRECATED_OP`. Status stays `ok`/`partial`.
 - Bump `ExecutionPlan.protocol_version` default to `"1.1"`. Server
   accepts `"1.0"` and `"1.1"`. `"1.2"` will retire the deprecated alias.
+- Both ops route to the same handler in the executor for the M2
+  duration — no behavioural divergence, only the wire literal differs.
 - Server reads from `Op` `op` literal as today; no wire-protocol break
   for legacy clients.
 
@@ -71,8 +74,8 @@ def normalize_message(message) -> NormalizedMessage:
         return _normalize_bar_data(message)             # intraday bars
     if message.hasElement("tickData"):
         return _normalize_tick_data(message)            # intraday ticks
-    if message.hasElement("fields"):
-        return _normalize_field_info(message)           # FieldInfoResponse
+    if message.hasElement("fieldData") and not message.hasElement("securityData"):
+        return _normalize_field_info(message)           # FieldInfoResponse (fieldData[] of {id, fieldInfo})
     if message.hasElement("schema") or message.hasElement("metaData"):
         return _normalize_schema(message)               # //blp/refdata schema
     return _normalize_generic(message)                  # fallback: dict-walk
@@ -117,6 +120,11 @@ Inside `_normalize_security_data`:
 `ErrorDetail` already has `security` and `field` optional fields —
 no schema change needed.
 
+Test fixture: `packages/blpremote_server/tests/fixtures/refdata_with_field_exceptions.json`
+(synthesised from blpapi docs in M2 phase 1; replaced with a real
+captured response in phase 2 once win has authorisation to run the
+capture script against live BBG).
+
 ### 2.4 Schema cache (server-side)
 
 New module: `blpremote_server/schema_cache.py`.
@@ -159,6 +167,32 @@ This is the "trust boundary" — once an LLM-generated plan passes the
 validator, it's known-shaped and known-bounded, even if BBG ultimately
 rejects it for other reasons.
 
+### 2.6 `ExecutionResult.warnings` (new field)
+
+Today `ExecutionResult` has `data`, `errors`, `status`. Add:
+
+```python
+warnings: list[ErrorDetail] = Field(default_factory=list)
+```
+
+`warnings` carry advisory items that didn't materially affect the
+result: deprecated-op notices, unverified-service flags, schema
+fallback messages. Distinguishes from `errors` (which mean some part
+of the request failed or returned partial data).
+
+Affected surfaces:
+- `models.ExecutionResult` server-side and client-side.
+- `NormalizedMessage` dataclass introduced in §2.2 — its `warnings`
+  field plumbs through to `ExecutionResult.warnings`.
+- Status calculation unchanged: `ok` if no errors, `partial` if
+  errors AND data, `error` if errors AND no data. Warnings never
+  affect status.
+
+Slight breakage for clients that only check `result.errors` — they
+miss deprecation notices but otherwise behave correctly. Mitigation:
+client convenience funcs surface warnings via a `warnings` parameter
+on the response wrapper (`ref_data`, `get_history`, etc).
+
 ## 3. Client surface (mac side, M2 deliverables)
 
 - Convenience funcs in `blpremote_client.data`:
@@ -190,38 +224,65 @@ rejects it for other reasons.
   query builder itself comes later.
 - Per-API-key rate limits (backlog, post-M5).
 
-## 5. Open coordination questions for win
+## 5. Decisions (locked 2026-05-06)
 
-1. **Schema cache exposure.** Do you want `get_service_schema` to be
-   a dedicated endpoint (`GET /v1/schema/{service}` with auth) so the
-   client doesn't have to build a SchemaRequest IR every time? My
-   preference: yes — this is a read-mostly cache hit on the server,
-   pretending it's a regular IR plan adds latency and noise to the
-   audit log (M4 JSONL).
+1. **Schema cache exposure.** Dedicated endpoint:
+   `GET /v1/schema/{service:path}` (path converter so the `//blp/foo`
+   slashes survive), bearer auth required. Server reads from the
+   `SchemaCache` (§2.4); supports `If-None-Match` returning 304 when
+   the cached schema hasn't refreshed since the client's last fetch.
+   Excluded from the M4 audit log (read-mostly, sub-ms when warm).
+   IR-passthrough for `SchemaRequest` stays available for completeness;
+   convenience surface uses the dedicated endpoint.
 
-2. **Deprecated op alias.** OK to keep `collect_refdata_response`
-   accepting for one minor version, or do you prefer a clean break
-   on protocol_version="1.1"? Clean break is fewer code paths but
-   any Krishna-side script pinned to 1.0 stops working.
+2. **Deprecated op alias.** `collect_refdata_response` remains
+   accepting through `protocol_version="1.1"`; retired in `"1.2"`.
+   The `IR_DEPRECATED_OP` notice goes in `warnings` (§2.6), not
+   `errors`. Keeps an unknown legacy script (Krishna may have a few)
+   working through the transition.
 
 3. **Validator allow-table location.** Hard-coded in `validate.py`
-   for the four services I listed, or driven from the schema cache
-   once warm? My preference: hard-coded for M2 (cache may not be
-   warm at first plan; we want the validator to fail fast). Refactor
-   to schema-driven in M8 when we need it for the LLM context anyway.
+   for `//blp/refdata`, `//blp/news`, `//blp/apiflds`,
+   `//blp/instruments`. Anything else triggers an
+   `IR_UNVERIFIED_SERVICE` warning (in `warnings`, §2.6). Hard-coded
+   table stays even after M8 layers schema-driven validation on top —
+   it's the fallback that means the validator never has to phone home.
 
-4. **fieldExceptions handler test data.** Do you have a saved BBG
-   response with a mix of valid + invalid fields you can share, or
-   should I synthesise one for the unit test? Mac side can mock the
-   message structure but a real BBG payload would be the only way
-   to be sure I've got the exception schema right.
+4. **fieldExceptions fixture.** Two-phase:
+   - **Phase 1** (now, mac-driven): synthesise the fixture from blpapi
+     docs — JSON shape per win's spec at the bottom of this section.
+     Stored at
+     `packages/blpremote_server/tests/fixtures/refdata_with_field_exceptions.json`.
+     Unblocks (b) without waiting on live capture.
+   - **Phase 2** (when win has authorisation, win-driven): capture one
+     real response, diff against the synthesised fixture, replace and
+     delete the synth. Likely the only deltas are `source` strings and
+     numeric `code` values.
 
-5. **Sequence within M2.** Proposing: (a) IR rename + protocol bump
-   (small, mac-driven); (b) per-field errors (small, win-driven on
-   server, mac follows with assertion in tests); (c) bar / tick
-   normalisers (win); (d) schema cache + endpoint (win); (e) client
-   convenience funcs + tests (mac, depends on a-d). Reasonable, or
-   reorder?
+   Synthesised fixture shape (per win):
+   ```
+   fieldExceptions[]:
+     fieldId         String  ("THIS_FIELD_IS_NOT_REAL")
+     errorInfo:
+       source        String  ("9::bbdbh1" or similar)
+       code          Int32   (e.g. 5)
+       category      String  ("BAD_FLD" / "NOT_APPLICABLE_TO_REF_DATA" / ...)
+       subcategory   String  ("INVALID_FIELD")
+       message       String  human-readable
+   ```
+
+5. **Sequence within M2.** Steps (a) and (b) run in parallel (different
+   files; no wire conflict — both ops route to the same handler):
+   - (a) IR rename + protocol bump + `warnings` field — **mac**.
+     Touches `models.py` (server + client), executor wire dispatch.
+   - (b) `fieldExceptions` per-field error surface — **win**. Touches
+     `executor/normalize.py` + validator. Uses the phase-1 fixture
+     mac ships in (a).
+   Then sequential:
+   - (c) bar + tick + field-info normalisers — **win**.
+   - (d) schema cache + dedicated endpoint — **win**.
+   - (e) client convenience funcs + schema client + tests — **mac**.
+     Depends on (a)–(d).
 
 ## 6. Acceptance criteria
 
@@ -229,17 +290,35 @@ M2 is `done` when:
 
 - [ ] `protocol_version="1.1"` accepted by server; `"1.0"` still works.
 - [ ] `collect_response` op wires through; `collect_refdata_response`
-      still works with deprecation warning.
-- [ ] Bar + tick + field-info responses normalise and round-trip
-      cleanly through the client.
+      still works and surfaces an `IR_DEPRECATED_OP` notice in the
+      result `warnings` list.
+- [ ] `ExecutionResult.warnings` round-trips end-to-end (server →
+      client) and is exposed to convenience-func callers.
+- [ ] Intraday bar response: a valid `IntradayBarRequest` returns
+      `≥1` bar through the client. (Empty-data must not pass.)
+- [ ] Intraday tick response: a valid `IntradayTickRequest` returns
+      `≥1` tick. (Empty-data must not pass.)
+- [ ] FieldInfo response normalises and round-trips through the client.
 - [ ] A `ref_data` call with a known-bad field surfaces the field
-      exception in `errors` and still returns the valid fields in
-      `data`. (Mac asserts; win verifies live.)
+      exception in `errors` (with `security` + `field` populated) and
+      still returns the valid fields in `data`. (Mac asserts against
+      phase-1 fixture; win verifies live and phase-2 fixture replaces.)
 - [ ] Schema cache populated on first request to `//blp/refdata`;
-      cache hit confirmed on second request via /metrics counter
-      (M4 prerequisite — for now just a log line).
+      cache hit confirmed on second request (log line for M2; counter
+      lands with M4).
+- [ ] `GET /v1/schema/{service:path}` returns the cached schema with
+      bearer auth; supports `If-None-Match` → 304.
 - [ ] Validator rejects an `IntradayBarRequest` missing `interval`.
+- [ ] Validator emits `IR_UNVERIFIED_SERVICE` warning for unknown
+      services.
 - [ ] Both-side verification posted on coord per the working
       agreement in PLAN.md.
 
-— mac
+## Revision history
+
+- **2026-05-06 r1** — initial proposal, mac.
+- **2026-05-06 r2 (LOCKED)** — win review folded in: dedicated schema
+  endpoint with `If-None-Match`/304, `warnings` list on
+  `ExecutionResult`, `fieldData` (not `fields`) as FieldInfoResponse
+  dispatcher key, two-phase fieldExceptions fixture, parallel (a)+(b)
+  sequence, ≥1-bar/tick acceptance criteria.
