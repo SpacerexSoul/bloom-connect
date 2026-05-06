@@ -14,17 +14,21 @@ file. Update the **Status** and **Branch** columns as work progresses.
 
 ## Milestones
 
-| ID | Title                                         | Owner | Status   | Branch | Notes |
-|----|-----------------------------------------------|-------|----------|--------|-------|
-| M0 | Tag current `main` as `legacy-v1`             | mac   | idle     | —      | snapshot before any breaking change |
-| M1 | Long-lived blpapi session + honest `/health`  | win   | idle     |        | needs live BBG to verify |
-| M2 | Generalize IR for all request types           | split | idle     |        | mac: client+tests · win: server+live verify |
-| M3 | Streaming subscriptions over SSE              | split | idle     |        | win: server · mac: client |
-| M4 | Request cache + structured logging + /metrics | mac   | idle     |        | LRU+TTL, JSON logs, Prometheus |
-| M5 | Auth hardening (JWT secret, rate limits)      | mac   | idle     |        | env-driven secret, per-user limits |
-| M6 | `setup.ps1` (python, venv, DLL, server+ngrok) | win   | idle     |        | pushes live ngrok URL to .coord/ |
-| M7 | pandas/polars client surface                  | mac   | idle     |        | `pd_history()`, `pl_history()` |
-| M8 | LLM query builder (stretch)                   | split | idle     |        | NL -> validated IR; client-side confirm |
+| ID | Title                                              | Owner | Status   | Branch | Notes |
+|----|----------------------------------------------------|-------|----------|--------|-------|
+| M0 | Tag current `main` as `legacy-v1`                  | mac   | done     | —      | tagged at the pre-M1 baseline |
+| M1 | Session lifecycle: long-lived + reconnect + honest `/health` + sub PoC | win   | idle     |        | hold session as app singleton; auto-reconnect w/ backoff; `/health` reflects real state; 30-line subscription lifecycle PoC inside M1 to de-risk M3 |
+| M2 | Generalize IR for all request types + schema cache | split | idle     |        | mac: client+tests · win: server+live verify · validator becomes trust boundary (LLM dep) · cache `SchemaRequest`/`FieldInfo` at first hit |
+| M3 | Streaming subscriptions over SSE                   | split | idle     |        | win: server · mac: client |
+| M4 | Request cache + structured logging + /metrics + JSONL audit | mac   | idle     |        | LRU+TTL · JSON logs · Prometheus · one-line-per-execute audit log (ts, user, req_id, compact IR, result hash, elapsed) |
+| M5 | Auth hardening (JWT secret, rate limits)           | mac   | idle     |        | env-driven secret, per-user limits |
+| M6 | `setup.ps1` (python, venv, DLL, server+ngrok)      | win   | idle     |        | pushes live ngrok URL to .coord/ |
+| M7 | pandas/polars client surface                       | mac   | idle     |        | `pd_history()`, `pl_history()` |
+| M8 | LLM query builder (stretch)                        | split | idle     |        | NL -> validated IR; client-side confirm |
+
+**Backlog (post-M5, not yet scheduled):**
+- Per-API-key (not per-user) rate limits with a key-name field, so we
+  can attribute load to specific strategies running in parallel.
 
 ## Working agreements
 
@@ -38,15 +42,16 @@ file. Update the **Status** and **Branch** columns as work progresses.
 - When you finish a milestone, update Status to `done` and post a
   message on coord linking the merge commit.
 
-## Open questions (active)
+## Decisions (locked)
 
-1. Sequence — M3 before M2, or M2 first? (M2 first locks IR shape; M3
-   first de-risks the session-management redesign.)
-2. LLM piece — server endpoint or client confirm-then-execute?
-3. Anything missing from win's daily-driver pov?
-
-(Answers to the above will update this section + their corresponding
-milestone rows.)
+1. **Sequence** — M2 before M3. IR generalization is foundational for
+   M4/M5/M8. Subscription PoC folded into M1 (30 lines) to de-risk the
+   session model.
+2. **LLM piece** — client-side translate-then-show-IR-then-confirm.
+   Validator stays the trust boundary; user always sees what's about
+   to run.
+3. **Daily-driver additions** — reconnect into M1, JSONL audit into
+   M4, schema cache into M2. All folded above.
 
 ## Stop conditions for autonomous mode
 
