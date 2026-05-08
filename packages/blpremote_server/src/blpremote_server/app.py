@@ -76,6 +76,12 @@ async def lifespan(_app: FastAPI):
         log_format=settings.log_format,
         log_level=settings.log_level,
     )
+    # M5 (A): JWT secret hardening. Refuse to boot with the sentinel
+    # default unless ALLOW_DEFAULT_SECRET is set (loud warning when
+    # allowed). ROTATE_SECRET_AT_BOOT replaces secret_key with a fresh
+    # random value, invalidating any tokens minted previously.
+    from blpremote_server.auth import assert_secret_is_safe
+    assert_secret_is_safe()
     mgr = get_manager()
     if BLPAPI_AVAILABLE:
         try:

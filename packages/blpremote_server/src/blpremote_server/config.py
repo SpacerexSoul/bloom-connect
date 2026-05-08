@@ -13,9 +13,34 @@ class Settings(BaseSettings):
     debug: bool = Field(default=False, description="Debug mode")
 
     # Authentication
+    # NB: this exact string is the *sentinel* default. Lifespan-time
+    # check rejects starting the server with this value unless
+    # ``allow_default_secret`` is explicitly true. Anything else is
+    # treated as user-configured and accepted.
     secret_key: str = Field(
         default="change-me-in-production-use-a-real-secret-key",
         description="JWT secret key",
+    )
+    allow_default_secret: bool = Field(
+        default=False,
+        description=(
+            "Permit booting with the sentinel default secret_key. Off by "
+            "default — production deployments MUST set BLPREMOTE_SECRET_KEY "
+            "to something distinct, otherwise the server refuses to start. "
+            "Set BLPREMOTE_ALLOW_DEFAULT_SECRET=true for local dev, with "
+            "the understanding that all tokens minted with the default "
+            "key are forgeable by anyone reading the source."
+        ),
+    )
+    rotate_secret_at_boot: bool = Field(
+        default=False,
+        description=(
+            "Generate a fresh random secret_key at every boot and discard "
+            "it on shutdown. Useful for ephemeral deployments where token "
+            "longevity beyond the current process is undesirable. Mutually "
+            "exclusive with allow_default_secret (rotation overrides). "
+            "Implication: every restart invalidates all outstanding tokens."
+        ),
     )
     token_expire_minutes: int = Field(default=60, description="Token expiration in minutes")
     algorithm: str = Field(default="HS256", description="JWT algorithm")

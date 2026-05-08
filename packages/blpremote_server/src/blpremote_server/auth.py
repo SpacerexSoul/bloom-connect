@@ -5,7 +5,9 @@ and better version compatibility.
 """
 
 import json
+import logging
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -14,6 +16,63 @@ import bcrypt
 from jose import JWTError, jwt
 
 from blpremote_server.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+# The literal sentinel default. Anything *else* in settings.secret_key
+# is treated as user-configured and accepted; this exact string is the
+# only value the boot-time check rejects.
+DEFAULT_SECRET_SENTINEL = "change-me-in-production-use-a-real-secret-key"
+
+
+class InsecureSecretError(RuntimeError):
+    """Raised at boot when secret_key is the sentinel default and
+    settings.allow_default_secret is False."""
+
+
+def assert_secret_is_safe() -> None:
+    """Boot-time guard. Call from FastAPI lifespan before serving.
+
+    Raises ``InsecureSecretError`` when the configured ``secret_key``
+    is still the sentinel default and the operator hasn't explicitly
+    opted in via ``BLPREMOTE_ALLOW_DEFAULT_SECRET=true``. Logs a loud
+    WARNING when the default is allowed (so dev runs are obviously
+    insecure but boot anyway).
+
+    Side effect: when ``BLPREMOTE_ROTATE_SECRET_AT_BOOT=true``, mutates
+    ``settings.secret_key`` to a fresh ``secrets.token_urlsafe(48)``
+    value before the check runs. Tokens minted in any prior boot
+    instantly become unverifiable.
+    """
+    if settings.rotate_secret_at_boot:
+        new_secret = secrets.token_urlsafe(48)
+        settings.secret_key = new_secret
+        logger.warning(
+            "BLPREMOTE_ROTATE_SECRET_AT_BOOT=true — generated a fresh "
+            "in-memory secret_key. All previously minted tokens are now "
+            "invalid. Clients will need to re-authenticate."
+        )
+        return
+
+    if settings.secret_key == DEFAULT_SECRET_SENTINEL:
+        if settings.allow_default_secret:
+            logger.warning(
+                "secret_key is the sentinel DEFAULT and "
+                "BLPREMOTE_ALLOW_DEFAULT_SECRET=true. JWTs minted by this "
+                "process are forgeable by anyone reading the source. "
+                "Acceptable for local dev; never set this on a "
+                "publicly-reachable host."
+            )
+            return
+        raise InsecureSecretError(
+            "secret_key is the sentinel default — refusing to start.\n"
+            "Set BLPREMOTE_SECRET_KEY to a high-entropy random string "
+            "(`python -c 'import secrets; print(secrets.token_urlsafe(48))'`).\n"
+            "For local dev only, set BLPREMOTE_ALLOW_DEFAULT_SECRET=true "
+            "to bypass this check (with the understanding that all "
+            "tokens become forgeable)."
+        )
 
 
 class UserStore:
