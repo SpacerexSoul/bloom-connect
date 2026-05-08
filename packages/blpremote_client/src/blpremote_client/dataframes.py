@@ -82,6 +82,12 @@ def pd_history(
     Multi-security / multi-field requests produce a wide frame with
     a MultiIndex on the columns ``(security, field)``. Single-security
     single-field flattens to a 1-D Series-like column.
+
+    Date arguments: pass ``datetime.date`` / ``datetime.datetime``
+    instances, or ``"YYYYMMDD"`` strings. Bloomberg's HistoricalDataRequest
+    rejects ISO-8601 dates ("2026-05-01") with "Invalid start date";
+    string args are passed through verbatim, only ``date``/``datetime``
+    objects get auto-formatted.
     """
     pd = _require_pandas()
     if isinstance(securities, str):
@@ -164,6 +170,12 @@ def pl_history(
     Polars doesn't have pandas' MultiIndex columns, so we return a
     *long* frame with explicit ``security`` / ``field`` / ``date`` /
     ``value`` columns. Reshape with ``.pivot()`` if you need wide.
+
+    Date arguments follow the same convention as :func:`pd_history` —
+    ``datetime.date`` / ``datetime.datetime`` get auto-formatted to
+    ``YYYYMMDD``; ISO-8601 strings ("2026-05-01") are passed verbatim
+    and rejected by BBG. Pass ``"YYYYMMDD"`` strings if you must use
+    strings.
     """
     pl = _require_polars()
     if isinstance(securities, str):
