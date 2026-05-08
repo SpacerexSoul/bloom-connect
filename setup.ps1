@@ -133,6 +133,16 @@ if ($listening) {
     Write-Step "4/6" "port $Port free" "Green"
 }
 
+# 4b. M5(A): default-secret guard. setup.ps1 is a dev bring-up; if
+# the caller hasn't picked a real BLPREMOTE_SECRET_KEY and hasn't
+# explicitly chosen on ALLOW_DEFAULT_SECRET, opt the process into
+# the loud-warning sentinel path so the server boots. Production
+# deployments set BLPREMOTE_SECRET_KEY upstream and skip this branch.
+if (-not $env:BLPREMOTE_SECRET_KEY -and -not $env:BLPREMOTE_ALLOW_DEFAULT_SECRET) {
+    $env:BLPREMOTE_ALLOW_DEFAULT_SECRET = "true"
+    Write-Host "      BLPREMOTE_ALLOW_DEFAULT_SECRET=true (dev opt-in; set BLPREMOTE_SECRET_KEY to silence)" -ForegroundColor Yellow
+}
+
 # 5. Start uvicorn detached
 Write-Step "5/6" "starting uvicorn on 0.0.0.0:$Port"
 $uvLog = Join-Path $env:TEMP "blpremote-uvicorn.log"
