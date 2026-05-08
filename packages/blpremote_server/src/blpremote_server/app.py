@@ -387,9 +387,13 @@ async def execute(
             # validator warnings from THIS call (the cached body has
             # the warnings from the original miss; this caller may
             # have a different validator path if settings changed).
+            # server_timing_ms reflects THIS call's latency, not the
+            # original miss — otherwise cached responses carry stale
+            # timing while wall-clock is sub-ms.
             served = cached_result.model_copy(update={
                 "request_id": plan.request_id,
                 "warnings": list(cached_result.warnings) + validation_warnings,
+                "server_timing_ms": elapsed_ms,
             })
             try:
                 audit_execute(
