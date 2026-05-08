@@ -366,8 +366,11 @@ async def execute(
 
     request_started = _time.time()
     try:
-        # Validate the plan
-        validate_plan(plan)
+        # Validate the plan. Returns a (possibly empty) list of
+        # validator-level warnings — IR_UNVERIFIED_SERVICE etc — that
+        # we plumb into ExecutionResult.warnings alongside any the
+        # executor adds (IR_DEPRECATED_OP, etc).
+        validation_warnings = validate_plan(plan)
 
         # M4(C): consult the LRU+TTL request cache before hitting blpapi.
         cache = get_request_cache()
@@ -380,8 +383,14 @@ async def execute(
                 pass
             # Re-stamp the request_id so two callers running the same
             # plan don't get back identical request_ids (would be
-            # confusing to chase in the audit log).
-            served = cached_result.model_copy(update={"request_id": plan.request_id})
+            # confusing to chase in the audit log). Also merge in any
+            # validator warnings from THIS call (the cached body has
+            # the warnings from the original miss; this caller may
+            # have a different validator path if settings changed).
+            served = cached_result.model_copy(update={
+                "request_id": plan.request_id,
+                "warnings": list(cached_result.warnings) + validation_warnings,
+            })
             try:
                 audit_execute(
                     plan=plan, result=served, user=username,
@@ -398,6 +407,14 @@ async def execute(
 
         # Execute the plan
         result = execute_plan(plan)
+        # Merge validator warnings (e.g. IR_UNVERIFIED_SERVICE) into
+        # whatever the executor produced. Putting validator warnings
+        # FIRST keeps the audit log consistent: validator items appear
+        # before runtime items.
+        if validation_warnings:
+            result = result.model_copy(update={
+                "warnings": validation_warnings + list(result.warnings),
+            })
         elapsed_ms = int((_time.time() - request_started) * 1000)
         if cache is not None:
             try:
@@ -411,6 +428,10 @@ async def execute(
         return result
 
     except PlanValidationError as e:
+        # The validation error path itself can't carry validation_warnings
+        # because it raised before they were collected for THIS error.
+        # Validators emit warnings only on success; on hard failure we
+        # surface just the error.
         result = ExecutionResult(
             request_id=plan.request_id,
             status="error",
