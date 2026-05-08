@@ -124,6 +124,30 @@ class Settings(BaseSettings):
             "windows produce a fresh hash each call and never hit the cache."
         ),
     )
+    # M5 (B): per-user rate limits via in-memory token bucket. The
+    # buckets refill at a steady rate; bursts of up to `bucket_size`
+    # are absorbed before any caller hits 429. Defaults are generous
+    # for a single-team deployment and intentionally NOT zero —
+    # zero on either field disables rate limiting for that bound.
+    rate_limit_per_minute: int = Field(
+        default=300,
+        description=(
+            "Maximum /v1/execute calls per user per 60s rolling window. "
+            "0 disables. Surfaces as HTTP 429 + RATE_LIMITED status in "
+            "/metrics when exceeded. Tune per deployment — default 300 "
+            "covers a normal interactive session with headroom."
+        ),
+    )
+    rate_limit_burst: int = Field(
+        default=30,
+        description=(
+            "Burst allowance — number of requests a user can fire in a "
+            "tight loop before throttling kicks in. Refills at "
+            "rate_limit_per_minute / 60 per second. 0 disables. Default "
+            "30 absorbs a small parallel fan-out (e.g. ten symbols × "
+            "three field families) without 429s."
+        ),
+    )
 
     model_config = {
         "env_prefix": "BLPREMOTE_",

@@ -233,6 +233,13 @@ request_cache_misses_total = Counter(
 )
 REGISTRY.register(request_cache_misses_total)
 
+rate_limited_total = Counter(
+    "blpremote_rate_limited_total",
+    "Requests rejected with HTTP 429 because the user's token bucket was empty.",
+    label_names=("user",),
+)
+REGISTRY.register(rate_limited_total)
+
 
 def render_exposition() -> str:
     """Render the entire registry as Prometheus exposition text."""

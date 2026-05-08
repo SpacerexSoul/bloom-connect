@@ -372,6 +372,25 @@ async def execute(
 
     request_started = _time.time()
     try:
+        # M5(B): per-user rate limit. Token-bucket; default 300/min
+        # with a burst of 30. Returns 429 when the user's bucket is
+        # empty. /metrics gets a rate_limited_total bump per rejection.
+        from blpremote_server.metrics import rate_limited_total
+        from blpremote_server.rate_limit import check_rate_limit
+        if not check_rate_limit(username):
+            try:
+                rate_limited_total.inc(user=username)
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"Rate limit exceeded for user '{username}'. "
+                    f"Limit: {settings.rate_limit_per_minute}/min, "
+                    f"burst: {settings.rate_limit_burst}."
+                ),
+            )
+
         # Validate the plan. Returns a (possibly empty) list of
         # validator-level warnings — IR_UNVERIFIED_SERVICE etc — that
         # we plumb into ExecutionResult.warnings alongside any the
