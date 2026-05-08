@@ -1,6 +1,7 @@
 # M8 — LLM-assisted query builder
 
-> Status: M8(A) ask() core landed @ 3ef7de7. M8(B) CLI demo + this guide on `mac/m8-B-cli`.
+> Status: M8(A) ask() core + (B) blpremote-ask CLI on main. (C) pivot
+> from Anthropic-only to OpenRouter on `mac/m8-C-openrouter-pivot`.
 
 `blpremote_client.llm.ask()` translates an English query into a
 validated Bloomberg IR plan that the same `RemoteHost.execute()`
@@ -18,19 +19,46 @@ field name or request type yet, a one-shot translator that returns
 win — and because the validator runs on every plan the model emits,
 there's no novel security surface.
 
+## Why OpenRouter, not Anthropic-direct
+
+OpenRouter is an OpenAI-compatible gateway that fronts dozens of
+providers. Three concrete wins:
+
+1. **Cost.** This task is constrained JSON transcription against a
+   fixed schema — it does not need a frontier model. Default model
+   is `deepseek/deepseek-chat` at ~$0.14/$0.28 per 1M tokens, which
+   is roughly 50× cheaper per call than `claude-haiku-4-5`. Same
+   structure, same fields, same plan shape — for a fraction of the
+   spend.
+2. **Flexibility.** Override `model=` with anything OpenRouter
+   exposes — `anthropic/claude-haiku-4-5`, `openai/gpt-4o-mini`,
+   `meta-llama/llama-3.3-70b-instruct`, etc. — without rewriting
+   client code. If a particular query needs a smarter model, swap
+   the string and try again.
+3. **Single SDK surface.** The `openai` SDK is widely installed and
+   battle-tested; `client.beta.chat.completions.parse()` accepts a
+   Pydantic model as `response_format` and returns a parsed
+   instance, so the validation flow is identical to what we'd
+   have with Anthropic structured outputs.
+
+If you want Anthropic-direct (e.g. for prompt-cache pricing on the
+schema block), point `base_url=` at `https://api.anthropic.com/v1/`
+and pass an Anthropic key — the OpenAI SDK speaks Anthropic's
+OpenAI-compat endpoint with no other changes.
+
 ## Install
 
-`anthropic` is an optional dependency:
+`openai` is an optional dependency:
 
 ```sh
 pip install -e packages/blpremote_client[llm]
 # or just
-pip install anthropic
+pip install openai
 ```
 
-Without `anthropic`, `from blpremote_client.llm import ask` works
-fine — the import is lazy. Calling `ask()` raises `ImportError`
-with an install hint pointing at the `[llm]` extra.
+Without `openai`, `from blpremote_client.llm import ask` works fine
+— the import is lazy. Calling `ask()` raises `ImportError` with an
+install hint pointing at the `[llm]` extra.
 
 ## Auth
 
@@ -38,11 +66,15 @@ Resolution order (matches the M5(C) identity pattern so callers
 don't have to think about which knob wins):
 
 1. `api_key=` kwarg passed to `ask()`
-2. `ANTHROPIC_API_KEY` env var
-3. `~/.blpremote/anthropic.json` with `{"api_key": "sk-ant-..."}`
+2. `OPENROUTER_API_KEY` env var
+3. `~/.blpremote/openrouter.json` with `{"api_key": "sk-or-..."}`
 
 If none of those resolve, `ask()` raises `RuntimeError` with a
 message that names all three sources.
+
+Get a key at https://openrouter.ai/ — they sell credit by the
+dollar; deepseek-chat at the default prompt size costs ≈ $0.0001
+per call.
 
 ## Programmatic use
 
@@ -62,6 +94,13 @@ print(result.data)                  # {"AAPL US Equity": {"PX_LAST": ...}}
 already validated against the M2 contract and has the caller's auth
 token injected (the model never sees it).
 
+To use a smarter (more expensive) model on a hard prompt:
+
+```python
+out = ask(host, "intraday 1-min bars for AAPL on 2026-05-08 between 9:30 and 10:00 ET",
+          model="anthropic/claude-haiku-4-5")
+```
+
 ## CLI
 
 ```sh
@@ -76,43 +115,37 @@ The CLI prints the plan + the explain string, asks `run this plan?
 - `--yes` / `-y` — skip the confirm prompt (for scripts).
 - `--dry-run` — print the plan and exit without executing.
 - `--json` — emit the `ExecutionResult` as JSON.
-- `--model claude-sonnet-4-6` — override the default
-  `claude-haiku-4-5` for harder prompts.
+- `--model anthropic/claude-haiku-4-5` — override the default
+  `deepseek/deepseek-chat` for harder prompts.
 
 ## Architecture
 
-### Anthropic Messages API + structured outputs
+### Structured output via OpenAI SDK
 
 ```python
-client.messages.parse(
-    model="claude-haiku-4-5",
-    system=[safety_block, schema_block_with_cache_control],
-    messages=[{"role": "user", "content": prompt}],
-    output_format=LLMPlanResponse,  # Pydantic model
+client = OpenAI(api_key=key, base_url="https://openrouter.ai/api/v1")
+client.beta.chat.completions.parse(
+    model="deepseek/deepseek-chat",
+    messages=[
+        {"role": "system", "content": SAFETY + SCHEMA},
+        {"role": "user", "content": prompt},
+    ],
+    response_format=LLMPlanResponse,  # Pydantic model
 )
 ```
 
-`messages.parse()` validates the model's JSON output against the
-Pydantic shape and returns a parsed instance. No prefill juggling,
-no manual JSON decode. If the model emits something off-shape the
-SDK raises before our code sees it.
+`beta.chat.completions.parse()` validates the model's JSON output
+against the Pydantic shape and returns a parsed instance. No prefill
+juggling, no manual JSON decode. If the model emits something
+off-shape the SDK raises before our code sees it.
 
-### Prompt caching
+### System prompt layout
 
-The system message has two text blocks:
-
-1. **Safety prompt** — hard rules (refuse trade execution / order
-   routing / synthetic data / unknown services), op-shape reference,
-   datetime conventions. Stable bytes — never changes between
-   requests.
-2. **Service schema** — JSON-rendered with `sort_keys=True` for
-   determinism, gated by `cache_control: {"type": "ephemeral"}`.
-
-The cache breakpoint at the end of block 2 covers everything before
-it, so the only varying tail is the user's prompt in `messages`.
-Schema bytes change only when BBG renegotiates services
-(~never per request) so cache hits are the steady state and per-call
-cost drops ~90%.
+The system message has the safety prompt first, then the service
+schema rendered with `sort_keys=True` for byte-stability across
+calls. Stable bytes first means providers behind OpenRouter that do
+prefix caching (some do, some don't) get a cache hit; the user's
+prompt at the end of `messages` is the only varying tail.
 
 ### Auth stripped from LLM context
 
@@ -157,6 +190,13 @@ The validator is the ultimate guard (no `place_order` op exists in
 the IR) but a refusal at the model layer is cheaper and produces a
 clearer error.
 
+### Field-name hints
+
+Cheap models occasionally emit `LAST_PRICE` instead of `PX_LAST`
+without explicit guidance. The safety prompt now spells out the BBG
+mnemonic mapping (`last price → PX_LAST`, `volume → VOLUME`, `bid →
+PX_BID`, etc) so we don't get bad fields back.
+
 ## Where to extend
 
 - **Multi-service prompts**: `service=` is a single string. A
@@ -167,17 +207,17 @@ clearer error.
   full-plan examples. Adding 1-2 worked examples in the system
   message would help on edge-case prompts (e.g. options chains,
   intraday across DST boundaries). Cost: extra cached tokens.
-- **Model auto-pick**: `claude-haiku-4-5` is the right default for
-  this constrained transcription task. Hard prompts (multi-leg
-  request building, complex date math) probably want
-  `claude-sonnet-4-6` — could route automatically based on prompt
-  length or detected complexity.
+- **Auto model selection**: route simple prompts to deepseek-chat
+  and complex ones to a smarter model based on prompt length or
+  detected complexity. The `model=` kwarg makes this trivially
+  upgradeable.
 
 ## Tests
 
-`tests/test_llm.py` (18 tests) covers system block layout,
-`cache_control` placement, request args, the auth-isolation
-invariant, the API key resolution chain, and the ImportError path.
-`tests/test_cli.py` (8 tests) covers CLI flow — dry-run, confirm,
-`--yes`, `--service`, `--json`, ImportError. Both run without
-network and without `anthropic` installed.
+`tests/test_llm.py` (19 tests) covers system message layout,
+schema-block determinism, the field-mnemonic hint, request args
+(model / temperature / response_format / message structure), the
+auth-isolation invariant, the API key resolution chain, and the
+ImportError path. `tests/test_cli.py` (8 tests) covers CLI flow —
+dry-run, confirm, `--yes`, `--service`, `--json`, ImportError. Both
+run without network and without `openai` installed.

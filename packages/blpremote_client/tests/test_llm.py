@@ -1,10 +1,10 @@
 """Tests for blpremote_client.llm.ask().
 
-The ``anthropic`` SDK is mocked via the ``_client`` test hook so the
-suite has no network dependency and runs without an API key. We
-assert: system block layout, cache_control placement, request
-parameters, auth-token injection, schema fetch + cache, API-key
-resolution chain.
+The OpenAI SDK is mocked via the ``_client`` test hook so the suite
+has no network dependency and runs without an API key. We assert:
+system message layout, request parameters, auth-token injection,
+schema fetch, API-key resolution chain, and the security invariant
+that the LLM never sees a token.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import BaseModel
 
 from blpremote_client import llm as llm_module
 from blpremote_client.llm import (
@@ -65,12 +64,14 @@ class _FakeHost:
 
 
 def _build_fake_client(parsed_output: LLMPlanResponse) -> MagicMock:
-    """Anthropic client stub: ``client.messages.parse()`` returns an
-    object whose ``.parsed_output`` is the canned ``LLMPlanResponse``."""
+    """OpenAI client stub: ``client.beta.chat.completions.parse()``
+    returns a ChatCompletion-shaped object whose
+    ``choices[0].message.parsed`` is the canned ``LLMPlanResponse``."""
     client = MagicMock()
     response = MagicMock()
-    response.parsed_output = parsed_output
-    client.messages.parse.return_value = response
+    response.choices = [MagicMock()]
+    response.choices[0].message.parsed = parsed_output
+    client.beta.chat.completions.parse.return_value = response
     return client
 
 
@@ -95,34 +96,41 @@ def _refdata_plan() -> _PlanWithoutAuth:
 
 
 class TestBuildSystem:
-    def test_two_blocks_safety_first_schema_second(self):
-        blocks = _build_system("//blp/refdata", SAMPLE_SCHEMA)
-        assert len(blocks) == 2
-        assert blocks[0]["type"] == "text"
-        # Safety prompt mentions hard rules
-        assert "trade" in blocks[0]["text"].lower()
-        assert "research" in blocks[0]["text"].lower() or "read-only" in blocks[0]["text"].lower()
-        # Safety block is NOT cached on its own — cache fires at the
-        # last block (schema), which covers everything before it too.
-        assert "cache_control" not in blocks[0]
+    def test_system_text_has_safety_then_schema(self):
+        text = _build_system("//blp/refdata", SAMPLE_SCHEMA)
+        # Safety prompt (with hard rules) appears before the schema
+        # block so providers that auto-cache prefixes can match the
+        # stable safety bytes across calls.
+        idx_safety = text.lower().find("trade")
+        idx_schema = text.find("## Schema for //blp/refdata")
+        assert idx_safety != -1 and idx_schema != -1
+        assert idx_safety < idx_schema
 
-    def test_schema_block_carries_cache_control(self):
-        blocks = _build_system("//blp/refdata", SAMPLE_SCHEMA)
-        assert blocks[1]["cache_control"] == {"type": "ephemeral"}
-        assert "//blp/refdata" in blocks[1]["text"]
+    def test_safety_mentions_read_only_research(self):
+        text = _build_system("//blp/refdata", SAMPLE_SCHEMA)
+        lower = text.lower()
+        assert "trade" in lower
+        assert "research" in lower or "read-only" in lower
 
-    def test_schema_serialised_with_sort_keys_for_cache_stability(self):
+    def test_schema_block_text_contains_service_and_payload(self):
+        block_text = _service_schema_block("//blp/apiflds", {"x": 1})
+        assert "//blp/apiflds" in block_text
+        assert '"x": 1' in block_text
+
+    def test_schema_serialised_with_sort_keys_for_stability(self):
         # Same dict in different insertion orders must produce the
-        # same rendered text — otherwise the cache key flips and we
-        # never get a hit.
+        # same rendered text — otherwise prompt-cache hash flips and
+        # we never get a hit on prefix-caching providers.
         a = {"service": "//blp/refdata", "operations": [{"name": "A"}]}
         b = {"operations": [{"name": "A"}], "service": "//blp/refdata"}
         assert _service_schema_block("//blp/refdata", a) == _service_schema_block("//blp/refdata", b)
 
-    def test_schema_payload_renders_inside_block_text(self):
-        block_text = _service_schema_block("//blp/apiflds", {"x": 1})
-        assert "//blp/apiflds" in block_text
-        assert '"x": 1' in block_text
+    def test_field_mnemonic_hint_in_safety(self):
+        # Cheap models occasionally emit LAST_PRICE instead of PX_LAST
+        # without explicit guidance. The safety prompt now spells out
+        # the BBG mnemonic mapping so we don't get bad fields back.
+        text = _build_system("//blp/refdata", SAMPLE_SCHEMA)
+        assert "PX_LAST" in text
 
 
 class TestAskHappyPath:
@@ -160,36 +168,38 @@ class TestAskHappyPath:
 
         assert host.get_schema_calls == [("//blp/apiflds", None)]
 
-    def test_anthropic_request_args_match_design(self):
+    def test_openai_request_args_match_design(self):
         host = _FakeHost()
         fake = _build_fake_client(LLMPlanResponse(plan=_refdata_plan(), explain="…"))
 
         ask(host, "AAPL last price", _client=fake)
 
-        fake.messages.parse.assert_called_once()
-        kwargs = fake.messages.parse.call_args.kwargs
+        fake.beta.chat.completions.parse.assert_called_once()
+        kwargs = fake.beta.chat.completions.parse.call_args.kwargs
         # Default model + deterministic temperature
-        assert kwargs["model"] == "claude-haiku-4-5"
+        assert kwargs["model"] == "deepseek/deepseek-chat"
         assert kwargs["temperature"] == 0.0
         assert kwargs["max_tokens"] == 2048
-        # The prompt is a single user turn, no prefill or assistant
-        # message — structured outputs handles JSON shape.
-        assert kwargs["messages"] == [{"role": "user", "content": "AAPL last price"}]
-        # System block carries cache_control on the schema half.
-        assert isinstance(kwargs["system"], list)
-        assert kwargs["system"][1].get("cache_control") == {"type": "ephemeral"}
-        # output_format is the wrapper Pydantic model.
-        assert kwargs["output_format"] is LLMPlanResponse
+        # Two messages: system then user. No system= kwarg in the
+        # OpenAI API; the system prompt rides in messages.
+        msgs = kwargs["messages"]
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert "trade" in msgs[0]["content"].lower()  # safety prompt
+        assert "//blp/refdata" in msgs[0]["content"]   # schema block
+        assert msgs[1] == {"role": "user", "content": "AAPL last price"}
+        # response_format is the wrapper Pydantic model.
+        assert kwargs["response_format"] is LLMPlanResponse
 
     def test_caller_can_override_model_and_temperature(self):
         host = _FakeHost()
         fake = _build_fake_client(LLMPlanResponse(plan=_refdata_plan(), explain="…"))
 
         ask(host, "hard prompt", _client=fake,
-            model="claude-sonnet-4-6", temperature=0.3)
+            model="anthropic/claude-haiku-4-5", temperature=0.3)
 
-        kwargs = fake.messages.parse.call_args.kwargs
-        assert kwargs["model"] == "claude-sonnet-4-6"
+        kwargs = fake.beta.chat.completions.parse.call_args.kwargs
+        assert kwargs["model"] == "anthropic/claude-haiku-4-5"
         assert kwargs["temperature"] == 0.3
 
 
@@ -213,87 +223,87 @@ class TestAuthIsolation:
 
 class TestApiKeyResolution:
     def test_explicit_kwarg_wins(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "from-env")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        cred = tmp_path / ".blpremote" / "anthropic.json"
+        cred = tmp_path / ".blpremote" / "openrouter.json"
         cred.parent.mkdir(parents=True)
         cred.write_text(json.dumps({"api_key": "from-file"}))
 
         assert _resolve_api_key("from-kwarg") == "from-kwarg"
 
     def test_env_wins_over_file(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "from-env")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        cred = tmp_path / ".blpremote" / "anthropic.json"
+        cred = tmp_path / ".blpremote" / "openrouter.json"
         cred.parent.mkdir(parents=True)
         cred.write_text(json.dumps({"api_key": "from-file"}))
 
         assert _resolve_api_key(None) == "from-env"
 
     def test_file_used_when_no_env(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        cred = tmp_path / ".blpremote" / "anthropic.json"
+        cred = tmp_path / ".blpremote" / "openrouter.json"
         cred.parent.mkdir(parents=True)
         cred.write_text(json.dumps({"api_key": "from-file"}))
 
         assert _resolve_api_key(None) == "from-file"
 
     def test_corrupt_json_falls_through_to_error(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        cred = tmp_path / ".blpremote" / "anthropic.json"
+        cred = tmp_path / ".blpremote" / "openrouter.json"
         cred.parent.mkdir(parents=True)
         cred.write_text("not valid json {{")
 
-        with pytest.raises(RuntimeError, match="No Anthropic API key"):
+        with pytest.raises(RuntimeError, match="No OpenRouter API key"):
             _resolve_api_key(None)
 
     def test_missing_required_field_in_file_falls_through(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        cred = tmp_path / ".blpremote" / "anthropic.json"
+        cred = tmp_path / ".blpremote" / "openrouter.json"
         cred.parent.mkdir(parents=True)
         cred.write_text(json.dumps({"not_the_key": "..."}))
 
-        with pytest.raises(RuntimeError, match="No Anthropic API key"):
+        with pytest.raises(RuntimeError, match="No OpenRouter API key"):
             _resolve_api_key(None)
 
     def test_no_source_raises_with_helpful_message(self, monkeypatch, tmp_path):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
         with pytest.raises(RuntimeError) as exc:
             _resolve_api_key(None)
         msg = str(exc.value)
-        assert "ANTHROPIC_API_KEY" in msg
-        assert "anthropic.json" in msg
+        assert "OPENROUTER_API_KEY" in msg
+        assert "openrouter.json" in msg
         assert "api_key=" in msg
 
 
 class TestImportError:
-    def test_missing_anthropic_raises_with_install_hint(self, monkeypatch):
+    def test_missing_openai_raises_with_install_hint(self, monkeypatch):
         host = _FakeHost()
 
         # Force the lazy import inside ask() to fail.
         import sys
 
-        original_anthropic = sys.modules.pop("anthropic", None)
+        original_openai = sys.modules.pop("openai", None)
         monkeypatch.setattr(
             "builtins.__import__",
-            _patched_import("anthropic", original=__import__),
+            _patched_import("openai", original=__import__),
         )
         try:
-            with pytest.raises(ImportError, match="pip install anthropic"):
+            with pytest.raises(ImportError, match="pip install openai"):
                 ask(host, "anything")
         finally:
-            if original_anthropic is not None:
-                sys.modules["anthropic"] = original_anthropic
+            if original_openai is not None:
+                sys.modules["openai"] = original_openai
 
 
 def _patched_import(blocked: str, *, original):
     def _imp(name, *args, **kwargs):
-        if name == blocked:
+        if name == blocked or name.startswith(f"{blocked}."):
             raise ImportError(f"{name} blocked for test")
         return original(name, *args, **kwargs)
     return _imp
