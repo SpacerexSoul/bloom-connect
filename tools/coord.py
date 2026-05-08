@@ -43,13 +43,24 @@ for _stream in (sys.stdout, sys.stderr):
 
 CFG_DIR = Path.home() / ".blpremote"
 TOKEN_FILE = CFG_DIR / "coord_token.json"
+# M5(C): identity.json is the canonical credential file shared with
+# blpremote_client.RemoteHost. coord.json is the legacy path — we
+# keep reading it so existing installs don't break, but new writes
+# (via setup.ps1, blpremote_client, etc.) target identity.json.
+IDENTITY_FILE = CFG_DIR / "identity.json"
 CONFIG_FILE = CFG_DIR / "coord.json"
 
 
 def _load_config() -> dict[str, str]:
     cfg: dict[str, str] = {}
-    if CONFIG_FILE.exists():
-        cfg.update(json.loads(CONFIG_FILE.read_text()))
+    # Identity file first (canonical), then coord.json as legacy fallback.
+    for candidate in (IDENTITY_FILE, CONFIG_FILE):
+        if candidate.exists():
+            try:
+                cfg.update(json.loads(candidate.read_text()))
+                break  # first valid one wins
+            except (OSError, json.JSONDecodeError):
+                continue
     for key, env in (("url", "BLPCOORD_URL"), ("user", "BLPCOORD_USER"), ("password", "BLPCOORD_PASS")):
         if os.environ.get(env):
             cfg[key] = os.environ[env]
@@ -57,7 +68,7 @@ def _load_config() -> dict[str, str]:
     if missing:
         sys.exit(
             "missing config: " + ", ".join(missing) +
-            f"\nset env vars BLPCOORD_URL/USER/PASS or write {CONFIG_FILE}"
+            f"\nset env vars BLPCOORD_URL/USER/PASS or write {IDENTITY_FILE}"
         )
     cfg["url"] = cfg["url"].rstrip("/")
     return cfg

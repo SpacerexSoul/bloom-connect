@@ -19,7 +19,7 @@ class RemoteHost:
 
     def __init__(
         self,
-        host: str,
+        host: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
         timeout: float = 30.0,
@@ -28,16 +28,41 @@ class RemoteHost:
         Initialize connection to a remote Bloomberg host.
 
         Args:
-            host: URL of the remote server (e.g., "http://192.168.1.100:8000")
-            username: Username for authentication
-            password: Password for authentication
-            timeout: Request timeout in seconds
+            host: URL of the remote server (e.g., "http://192.168.1.100:8000").
+                  When None, falls back to ``~/.blpremote/identity.json`` (or
+                  legacy ``coord.json``) and the BLPCOORD_URL env var.
+            username: Username for authentication. Same fallback chain.
+            password: Password for authentication. Same fallback chain.
+            timeout: Request timeout in seconds.
+
+        Resolution order: explicit kwarg > BLPCOORD_* env > identity file.
+        Constructs successfully with no kwargs if a complete identity
+        file exists. Raises AuthenticationError when both kwargs and
+        identity sources fail to produce all three fields.
         """
-        self.host = host.rstrip("/")
-        self.username = username
-        self.password = password
+        from blpremote_client.identity import resolve_identity
+
+        resolved = resolve_identity(url=host, user=username, password=password)
+        if resolved is None:
+            # Backwards compat: if the caller explicitly passed at least a
+            # host but no credentials and no identity file exists, mirror
+            # the previous behaviour and accept a credentialless RemoteHost
+            # (TokenManager will raise on first call if it can't pair).
+            if host is None:
+                raise AuthenticationError(
+                    "RemoteHost: no host provided and no identity file at "
+                    "~/.blpremote/identity.json (or legacy coord.json). "
+                    "Pass host=... or write the identity file."
+                )
+            self.host = host.rstrip("/")
+            self.username = username
+            self.password = password
+        else:
+            self.host = resolved["url"]
+            self.username = resolved["user"]
+            self.password = resolved["password"]
         self.timeout = timeout
-        self._token_manager = TokenManager(host)
+        self._token_manager = TokenManager(self.host)
         self._client = httpx.Client(timeout=timeout)
 
     def _get_token(self) -> str:
