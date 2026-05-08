@@ -105,3 +105,48 @@ class TestPerUserCheck:
             assert check_rate_limit("mac") is True
         # 11th: throttled.
         assert check_rate_limit("mac") is False
+
+
+class TestRateLimitSurfacesAs429:
+    """Regression: a throttled /v1/execute must surface as HTTP 429, not
+    as HTTP 200 with an EXECUTION_FAILED body. Earlier the catch-all
+    ``except Exception`` in ``execute`` swallowed the rate-limit
+    HTTPException and re-wrapped it as a 200 result. The fix re-raises
+    HTTPException before the catch-all; this test pins that behavior.
+    """
+
+    def test_throttled_request_returns_http_429(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from blpremote_server import rate_limit as rl_module
+        from blpremote_server.app import app, get_current_user
+
+        # Force the limiter to deny every check.
+        monkeypatch.setattr(rl_module, "check_rate_limit", lambda u: False)
+        # Bypass JWT auth — we're not testing auth here.
+        app.dependency_overrides[get_current_user] = lambda: "tester"
+        try:
+            client = TestClient(app)
+            plan = {
+                "auth": {"token": "x"},
+                "ops": [
+                    {"op": "start_session"},
+                    {"op": "open_service", "service": "//blp/refdata"},
+                    {"op": "create_request", "service": "//blp/refdata",
+                     "request": "ReferenceDataRequest", "id": "r1"},
+                    {"op": "append", "id": "r1", "path": "securities",
+                     "value": "AAPL US Equity"},
+                    {"op": "append", "id": "r1", "path": "fields",
+                     "value": "PX_LAST"},
+                    {"op": "send_request", "id": "r1", "correlation_id": "c1"},
+                    {"op": "collect_response", "correlation_id": "c1",
+                     "timeout_ms": 1000},
+                ],
+            }
+            r = client.post("/v1/execute", json=plan)
+            assert r.status_code == 429, (
+                f"expected HTTP 429, got {r.status_code} body={r.text[:200]}"
+            )
+            assert "Rate limit" in r.json().get("detail", "")
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)

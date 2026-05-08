@@ -475,6 +475,12 @@ async def execute(
         except Exception:
             logger.exception("audit_execute failed (validation path)")
         return result
+    except HTTPException:
+        # Let FastAPI surface intentional HTTP errors (e.g. M5(B)'s
+        # 429 from the rate-limit guard). Without this, the catch-all
+        # below wraps the HTTPException as an EXECUTION_FAILED 200
+        # response and the client never sees the real status code.
+        raise
     except Exception as e:
         result = ExecutionResult(
             request_id=plan.request_id,
