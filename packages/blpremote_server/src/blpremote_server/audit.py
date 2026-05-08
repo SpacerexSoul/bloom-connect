@@ -40,7 +40,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import threading
 from typing import Any, Optional
 
@@ -241,7 +240,7 @@ def audit_execute(
                 # logger output even when log_format=text.
                 line = dict(entry)
                 line["ts"] = _utc_iso_z()
-                fh.write(json.dumps(line, separators=(",", ":")) + os.linesep)
+                fh.write(json.dumps(line, separators=(",", ":")) + "\n")
             except OSError as e:
                 _audit_logger.warning(
                     "audit tee write failed",
