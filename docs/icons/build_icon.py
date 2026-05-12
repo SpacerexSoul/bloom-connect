@@ -96,6 +96,17 @@ def main() -> int:
             img.save(ICONSET / name, "PNG")
         print(f"  built {size}×{size} ({len(names)} iconset variant{'s' if len(names) > 1 else ''})")
 
+    # Windows .ico — multi-resolution single file. Pillow handles
+    # this in one save call; same source PNGs, no extra tooling.
+    ico_path = HERE / "bloom-connect.ico"
+    ico_base = build(256)
+    ico_base.save(
+        ico_path,
+        format="ICO",
+        sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+    print(f"  wrote {ico_path.name} ({ico_path.stat().st_size} bytes)")
+
     print(f"\nrunning iconutil → {ICNS.name}")
     if sys.platform != "darwin":
         print("  not on macOS; skipping .icns conversion. PNGs are in docs/icons/png/.")
@@ -104,7 +115,7 @@ def main() -> int:
         ["iconutil", "-c", "icns", "-o", str(ICNS), str(ICONSET)],
         check=True,
     )
-    print(f"  wrote {ICNS} ({ICNS.stat().st_size} bytes)")
+    print(f"  wrote {ICNS.name} ({ICNS.stat().st_size} bytes)")
     return 0
 
 

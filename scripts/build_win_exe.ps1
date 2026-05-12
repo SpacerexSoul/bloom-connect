@@ -41,8 +41,15 @@ Remove-Item -Recurse -Force build_artifacts -ErrorAction SilentlyContinue
 New-Item -ItemType Directory build_artifacts | Out-Null
 Push-Location build_artifacts
 
+$IconFlag = @()
+$IconPath = "..\docs\icons\bloom-connect.ico"
+if (Test-Path $IconPath) {
+    $IconFlag = @("--icon", $IconPath)
+}
+
 & ..\.venv-build\Scripts\pyinstaller.exe --noconfirm --windowed `
     --name "Bloomberg Remote Server" `
+    @IconFlag `
     --hidden-import blpremote_server.ui `
     --hidden-import blpremote_server.app `
     --hidden-import blpremote_server.session `
