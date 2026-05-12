@@ -1,70 +1,61 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
 
-# Distribution / packaging
+__pycache__/
+.blpremote/
+.coord/last_ngrok_url.txt
+.coverage
+.DS_Store
+.eggs/
+.env
+.env.local
+.idea/
+.installed.cfg
+.nox/
+.pytest_cache/
 .Python
+.ruff_cache/
+.tox/
+.venv-build/
+.venv/
+.vscode/
+*.egg
+*.egg-info/
+*.local.json
+*.log
+*.py[cod]
+*.spec
+*.swo
+*.swp
+*~
+*$py.class
+# Byte-compiled / optimized / DLL files
+# Distribution / packaging
+# IDE
+# Local configuration
+# OS files
+# Ruff / Linting
+# runs them locally with redirection these stay out:
+# Server-side user store (contains hashed passwords)
+# setup.ps1 stash — ngrok URL changes on every restart, not committable
+# Testing
+# Token storage (client side)
+# uvicorn / ngrok stdout logs from setup.ps1 land in TEMP, but if anyone
+# Virtual environments
+build_artifacts/
 build/
 develop-eggs/
 dist/
+docs/icons/bloom-connect.iconset/
 downloads/
 eggs/
-.eggs/
+env/
+ENV/
+htmlcov/
 lib/
 lib64/
 parts/
 sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-venv/
-.venv/
-ENV/
-env/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# Ruff / Linting
-.ruff_cache/
-
-# Local configuration
-.env
-.env.local
-*.local.json
-
-# Token storage (client side)
-.blpremote/
-
-# Server-side user store (contains hashed passwords)
-users.json
-
-# setup.ps1 stash — ngrok URL changes on every restart, not committable
-.coord/last_ngrok_url.txt
-# uvicorn / ngrok stdout logs from setup.ps1 land in TEMP, but if anyone
-# runs them locally with redirection these stay out:
-*.log
-
-# OS files
-.DS_Store
 Thumbs.db
-build_artifacts/
-.venv-build/
-*.spec
-docs/icons/bloom-connect.iconset/
+users.json
+var/
+venv/
+wheels/
