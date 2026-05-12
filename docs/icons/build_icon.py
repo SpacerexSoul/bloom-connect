@@ -1,11 +1,11 @@
 """Build the bloom-connect app icon.
 
-Design (v3, Bloomberg Terminal palette per krishna):
-- Pure black background — the iconic dark trading-screen feel.
-- "Bc" monogram, set tight, lowercase c — the brand initials.
-- Amber B (#FFB000, the Terminal function-key label tone) + orange
-  c (#FE9F00, the Bloomberg signature orange). Two-amber palette
-  references the Terminal typography directly.
+Design (v4 per krishna): orange B + green c on black.
+- Pure black background — Terminal dark trading-screen feel.
+- "Bc" monogram, set tight, lowercase c.
+- B in Bloomberg signature orange (#FE9F00). c in connected-LED
+  green (#2ea043, matches LED_COLOUR['happy'] in the UI). The c
+  carries the live-connection accent in the letterform.
 - Bold sans (Helvetica Neue Bold from the system) — heavy weight
   reads at 16×16 in Finder list view; lighter weights muddy.
 - Bloomberg colour usage is descriptive (fair use for an
@@ -37,8 +37,8 @@ ICNS = HERE / "bloom-connect.icns"
 ICO = HERE / "bloom-connect.ico"
 
 BG = (0x00, 0x00, 0x00, 0xff)     # pure black, the Terminal screen
-AMBER = (0xff, 0xb0, 0x00, 0xff)  # Terminal function-key amber
 ORANGE = (0xfe, 0x9f, 0x00, 0xff) # Bloomberg signature orange
+GREEN = (0x2e, 0xa0, 0x43, 0xff)  # LED_COLOUR['happy'] from the UI
 
 # Helvetica Neue Bold ships with macOS; index 1 is typically Bold
 # in the .ttc. Falls back to Arial Black if absent.
@@ -103,8 +103,8 @@ def build(size: int) -> Image.Image:
     # Align c to the baseline of B — c sits lower because lowercase.
     cy = by + (bh - ch) - bc[1] + bb[1]
 
-    d.text((bx, by), "B", font=font, fill=AMBER)
-    d.text((cx, cy), "c", font=font, fill=ORANGE)
+    d.text((bx, by), "B", font=font, fill=ORANGE)
+    d.text((cx, cy), "c", font=font, fill=GREEN)
 
     return img
 
