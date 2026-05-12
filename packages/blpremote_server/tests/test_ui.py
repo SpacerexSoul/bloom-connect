@@ -19,9 +19,12 @@ from blpremote_server.ui import (
     build_start_command,
     build_stop_command,
     detect_bloomberg,
+    ngrok_authtoken_status,
     parse_health,
     probe_jwt,
     read_ngrok_url,
+    read_pairing_code,
+    regenerate_jwt_secret,
     start_button_state,
 )
 
@@ -205,3 +208,69 @@ class TestBuildSendUrlCommand:
         assert "send" in cmd
         # No raw body in argv — that's the whole point of the file.
         assert not any("server up at" in arg for arg in cmd)
+
+
+# 8. Settings-dialog helpers (M10 item 5).
+class TestReadPairingCode:
+    def test_absent_returns_none(self, tmp_path):
+        assert read_pairing_code(tmp_path / "nope.txt") is None
+
+    def test_present_returns_stripped(self, tmp_path):
+        p = tmp_path / "code.txt"
+        p.write_text("eyJ2IjoxLCJ1cmwiOiJ4In0=  \n", encoding="utf-8")
+        assert read_pairing_code(p) == "eyJ2IjoxLCJ1cmwiOiJ4In0="
+
+    def test_present_with_powershell_bom(self, tmp_path):
+        # setup.ps1 chunk (e) writes via Out-File which leaves a BOM
+        # on PS5; same trap as read_ngrok_url. utf-8-sig must strip.
+        p = tmp_path / "code.txt"
+        p.write_bytes("﻿eyJ2IjoxLCJ1cmwiOiJ4In0=".encode("utf-8"))
+        assert read_pairing_code(p) == "eyJ2IjoxLCJ1cmwiOiJ4In0="
+
+    def test_whitespace_only_treated_as_absent(self, tmp_path):
+        p = tmp_path / "code.txt"
+        p.write_text("   \n", encoding="utf-8")
+        assert read_pairing_code(p) is None
+
+
+class TestRegenerateJwtSecret:
+    def test_writes_64_char_secret_and_returns_it(self, tmp_path):
+        path = tmp_path / "subdir" / "server_secret.txt"
+        new_secret = regenerate_jwt_secret(path)
+        # token_urlsafe(48) emits ~64 url-safe chars (no padding).
+        assert len(new_secret) >= 60
+        assert path.read_text(encoding="utf-8").strip() == new_secret
+        # Parent dir created if absent.
+        assert path.parent.is_dir()
+
+    def test_idempotent_overwrite(self, tmp_path):
+        path = tmp_path / "server_secret.txt"
+        first = regenerate_jwt_secret(path)
+        second = regenerate_jwt_secret(path)
+        # New secret each call -- that's the whole point.
+        assert first != second
+        # File holds the latest.
+        assert path.read_text(encoding="utf-8").strip() == second
+
+
+class TestNgrokAuthtokenStatus:
+    def test_missing_file(self, tmp_path):
+        assert ngrok_authtoken_status(tmp_path / "ngrok.yml") == ("unhappy", "Missing")
+
+    def test_present_with_authtoken(self, tmp_path):
+        p = tmp_path / "ngrok.yml"
+        p.write_text("version: 2\nauthtoken: 12345abcde\n", encoding="utf-8")
+        assert ngrok_authtoken_status(p) == ("happy", "Configured")
+
+    def test_present_without_authtoken_is_missing(self, tmp_path):
+        # A cfg file can exist (e.g. region: us) without an authtoken.
+        p = tmp_path / "ngrok.yml"
+        p.write_text("version: 2\nregion: us\n", encoding="utf-8")
+        assert ngrok_authtoken_status(p) == ("unhappy", "Missing")
+
+    def test_authtoken_must_be_a_top_level_key(self, tmp_path):
+        # Defensive: a tunnels-block child key called authtoken_id
+        # (hypothetical) shouldn't trigger a false-positive.
+        p = tmp_path / "ngrok.yml"
+        p.write_text("tunnels:\n  some_authtoken_id: x\n", encoding="utf-8")
+        assert ngrok_authtoken_status(p) == ("unhappy", "Missing")
