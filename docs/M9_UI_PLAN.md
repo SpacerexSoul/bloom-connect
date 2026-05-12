@@ -172,6 +172,57 @@ Rewrite scope:
   been pruned).
 - Two screenshots: server UI and client UI.
 
+## Win-side refinements (from coord 2026-05-12)
+
+Win read the plan and signed off on the win-side scope, with four
+real refinements worth baking in from line 1:
+
+1. **HiDPI on Windows ≥8**. Default Tk looks fuzzy on 4K / scaled
+   displays unless you call `ctypes.windll.shcore.SetProcessDpiAwareness(1)`
+   (or `SetProcessDPIAware()` on older Windows) **before** importing
+   tkinter. Three lines, fixes a real-feel issue.
+2. **Don't block the Tk event loop.** /health polling, subprocess
+   output draining, "Send URL to Mac" — all go through
+   `root.after(2000, refresh)` or a background `threading.Thread`
+   feeding a `queue.Queue` that the main thread drains via `after`.
+   Standard tkinter long-running-work pattern; mention in code
+   comments so future-us doesn't accidentally `time.sleep` in the
+   handler.
+3. **ttk theme = `clam`**, not `vista` (Win 10/11 default). `clam`
+   looks closer to the IBKR-style restraint we're after and works
+   identically on macOS. Set with `ttk.Style().theme_use("clam")`.
+4. **Setup.ps1 launch shape**: confirmed wrap, not port.
+   - `subprocess.Popen(["powershell.exe", "-NoProfile",
+     "-ExecutionPolicy", "Bypass", "-File", "setup.ps1",
+     "-CoordSend", "mac"], stdout=PIPE, stderr=STDOUT, bufsize=1,
+     text=True)`. Stream stdout into the logs tail via the
+     queue+after pattern.
+   - **Fast-path "already running"**: UI `[Start Server]` should
+     call `/health` first; if 200, skip Popen and just flip the
+     status LED to green. Don't blindly re-spin uvicorn over a
+     running instance.
+   - **Child-process cleanup on Stop**: `Popen.terminate()` ends
+     powershell.exe but its spawned `python.exe` (uvicorn) and
+     `ngrok.exe` can outlive it on Windows. Track the child PIDs
+     out-of-band, or wrap the spawn in a job object so killing the
+     parent cascades. Win will figure out the exact mechanism
+     during implementation — flagging here so it's not forgotten.
+
+## Win's chunk plan (when greenlit)
+
+a. Skeleton: window + four status rows + three buttons + scrolled
+   logs tail, no behaviour. ~50 LOC. Commit as a UI skeleton.
+b. Status block wiring: BBG detect (tasklist / psutil), /health
+   poll, JWT-secret check from settings, ngrok URL pulled from
+   the location `setup.ps1` writes it (win to confirm path; likely
+   `.coord/last_ngrok_url.txt`).
+c. Buttons wired: `[Start Server]` → setup.ps1 Popen with
+   /health fast-path; `[Stop Server]` → terminate + child cleanup;
+   `[Send URL to Mac]` → coord.py send.
+d. Launcher: `START_SERVER_UI.bat` at repo root.
+e. Live verify: double-click the .bat, walk through
+   start/stop/send-URL, post result on coord.
+
 ## Implementation order (next session)
 
 1. **Tier B Tkinter UIs first** — server.py + client.py, 3–4h. Both
