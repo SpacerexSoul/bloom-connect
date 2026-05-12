@@ -1,11 +1,15 @@
 """Build the bloom-connect app icon.
 
-Design (v4 per krishna): orange B + green c on black.
+Design (v5 per krishna): orange B + green c on black, with a
+translucent candlestick chart behind the letters.
 - Pure black background — Terminal dark trading-screen feel.
-- "Bc" monogram, set tight, lowercase c.
+- "Bc" monogram, set tight, lowercase c, foreground layer.
 - B in Bloomberg signature orange (#FE9F00). c in connected-LED
-  green (#2ea043, matches LED_COLOUR['happy'] in the UI). The c
-  carries the live-connection accent in the letterform.
+  green (#2ea043, matches LED_COLOUR['happy'] in the UI).
+- Background candles: deterministic seeded pattern of 8 OHLC bars
+  spread across the icon's middle band, ~15% alpha. Subtle enough
+  to not muddy the letters at any size; provides the "trading
+  chart" visual context that says "this is a Bloomberg tool".
 - Bold sans (Helvetica Neue Bold from the system) — heavy weight
   reads at 16×16 in Finder list view; lighter weights muddy.
 - Bloomberg colour usage is descriptive (fair use for an
@@ -39,6 +43,24 @@ ICO = HERE / "bloom-connect.ico"
 BG = (0x00, 0x00, 0x00, 0xff)     # pure black, the Terminal screen
 ORANGE = (0xfe, 0x9f, 0x00, 0xff) # Bloomberg signature orange
 GREEN = (0x2e, 0xa0, 0x43, 0xff)  # LED_COLOUR['happy'] from the UI
+RED   = (0xcf, 0x22, 0x2e, 0xff)  # LED_COLOUR['unhappy'] — down-candles
+
+# Deterministic candle pattern. Each entry is (open_pct, close_pct,
+# low_pct, high_pct) as a fraction of the icon's vertical "chart
+# band" (0 = bottom of band, 1 = top). Hand-picked so the silhouette
+# tells a small story: 3 up-bars trending up, a pullback, then 2
+# more up-bars — recognisable as a "chart" rather than random noise.
+CANDLES = [
+    # (open, close, low, high)
+    (0.30, 0.45, 0.25, 0.50),
+    (0.45, 0.55, 0.40, 0.60),
+    (0.55, 0.70, 0.50, 0.78),
+    (0.70, 0.62, 0.58, 0.74),
+    (0.62, 0.55, 0.50, 0.66),
+    (0.55, 0.68, 0.52, 0.72),
+    (0.68, 0.82, 0.64, 0.88),
+    (0.82, 0.78, 0.74, 0.85),
+]
 
 # Helvetica Neue Bold ships with macOS; index 1 is typically Bold
 # in the .ttc. Falls back to Arial Black if absent.
@@ -60,12 +82,59 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
+def _draw_candles(d: ImageDraw.ImageDraw, size: int) -> None:
+    """Translucent OHLC candles in the icon's middle vertical band.
+    Drawn before the letters so they sit behind. Skipped at very
+    small sizes (≤32) where the candles would just look like noise
+    and the letters need every pixel."""
+    if size <= 32:
+        return
+    # Chart band spans 22%–78% of icon height (avoids the squircle's
+    # rounded corners + leaves room above/below for breathing).
+    band_top = size * 0.22
+    band_bot = size * 0.78
+    n = len(CANDLES)
+    # Each candle column gets equal width; bodies are ~55% of column.
+    col_w = (size * 0.86) / n
+    margin = size * 0.07
+    body_w = max(2, int(col_w * 0.55))
+    wick_w = max(1, int(col_w * 0.10))
+    alpha = 65  # ~25% opacity — present, but doesn't compete with text
+
+    def y_of(pct: float) -> float:
+        return band_bot - pct * (band_bot - band_top)
+
+    for i, (o, c, lo, hi) in enumerate(CANDLES):
+        cx = margin + col_w * (i + 0.5)
+        colour = GREEN[:3] + (alpha,) if c >= o else RED[:3] + (alpha,)
+        # wick
+        d.rectangle(
+            (cx - wick_w / 2, y_of(hi), cx + wick_w / 2, y_of(lo)),
+            fill=colour,
+        )
+        # body
+        top, bot = sorted([y_of(o), y_of(c)])
+        d.rectangle(
+            (cx - body_w / 2, top, cx + body_w / 2, bot),
+            fill=colour,
+        )
+
+
 def build(size: int) -> Image.Image:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
     radius = int(size * 0.22)
     d.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=BG)
+
+    # Candles render onto a separate layer so the alpha composites
+    # correctly with the black background (else additive blending
+    # makes them too bright).
+    candle_layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    cdraw = ImageDraw.Draw(candle_layer)
+    _draw_candles(cdraw, size)
+    img.alpha_composite(candle_layer)
+    d = ImageDraw.Draw(img)  # rebind after composite
 
     # Pick font size so "Bc" fills ~60% of width. Helvetica Neue Bold
     # has B at ~0.72em wide, c at ~0.55em — total ~1.27em including a
