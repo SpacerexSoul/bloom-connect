@@ -171,10 +171,60 @@ if ($NoNgrok) {
     return
 }
 
-$ngrok = Join-Path $PSScriptRoot "tools\ngrok.exe"
+# Resolve ngrok binary, downloading if needed (M10 chunk a).
+# Search order:
+#   1. tools\ngrok\ngrok.exe (canonical install path)
+#   2. tools\ngrok.exe       (back-compat for manual installs)
+#   3. download from official mirror
+$ngrok = Join-Path $PSScriptRoot "tools\ngrok\ngrok.exe"
 if (-not (Test-Path $ngrok)) {
-    Write-Step "6/6" "tools\ngrok.exe missing -- install or pass -NoNgrok" "Yellow"
-    return
+    $ngrokAlt = Join-Path $PSScriptRoot "tools\ngrok.exe"
+    if (Test-Path $ngrokAlt) {
+        $ngrok = $ngrokAlt
+    } else {
+        Write-Step "6/6" "ngrok not found -- downloading from official mirror"
+        $ngrokDir = Join-Path $PSScriptRoot "tools\ngrok"
+        New-Item -ItemType Directory -Path $ngrokDir -Force | Out-Null
+        $zipPath = Join-Path $env:TEMP "ngrok-v3-windows.zip"
+        $dlUrl = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+        try {
+            # ProgressPreference=SilentlyContinue speeds Invoke-WebRequest
+            # ~10x on PS5 by skipping the progress-bar render.
+            $prevProgress = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+            Invoke-WebRequest -Uri $dlUrl -OutFile $zipPath -UseBasicParsing
+            $ProgressPreference = $prevProgress
+            Expand-Archive -Path $zipPath -DestinationPath $ngrokDir -Force
+        } finally {
+            Remove-Item $zipPath -ErrorAction SilentlyContinue
+        }
+        $ngrok = Join-Path $ngrokDir "ngrok.exe"
+        if (-not (Test-Path $ngrok)) {
+            throw "ngrok download succeeded but ngrok.exe not found in $ngrokDir"
+        }
+        $ver = (& $ngrok --version 2>&1 | Out-String).Trim()
+        Write-Host "      installed: $ver" -ForegroundColor Gray
+    }
+}
+
+# Authtoken bootstrap (M10 chunk b). ngrok 3 stores config at
+# $LOCALAPPDATA\ngrok\ngrok.yml on Windows. Probe the file directly
+# instead of `ngrok config check` (which returns 0 even without a
+# token, just warns to stderr). If absent, open the dashboard in the
+# user's browser and read the pasted token from the console.
+$ngrokCfg = Join-Path $env:LOCALAPPDATA "ngrok\ngrok.yml"
+$hasAuthToken = (Test-Path $ngrokCfg) -and `
+    ((Get-Content $ngrokCfg -Raw -ErrorAction SilentlyContinue) -match "(?m)^\s*authtoken:")
+if (-not $hasAuthToken) {
+    Write-Host "      ngrok needs an authtoken; opening dashboard..." -ForegroundColor Yellow
+    Start-Process "https://dashboard.ngrok.com/get-started/your-authtoken"
+    $token = Read-Host -Prompt "      paste your ngrok authtoken"
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        throw "no authtoken provided -- aborting (re-run setup.ps1 to retry)"
+    }
+    & $ngrok config add-authtoken $token.Trim() | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "ngrok config add-authtoken failed (exit $LASTEXITCODE)" }
+    Write-Host "      authtoken saved to $ngrokCfg" -ForegroundColor Green
 }
 
 # Reset any existing ngrok process so we get a fresh tunnel.
