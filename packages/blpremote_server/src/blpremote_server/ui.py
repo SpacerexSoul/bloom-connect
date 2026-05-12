@@ -321,14 +321,36 @@ def start_button_state(bbg_state: str) -> str:
 # --- Command builders (pure; tests live in test_ui.py) --------------
 
 
+def venv_has_blpremote_server(repo_root: Path) -> bool:
+    """True iff <repo_root>/.venv has had blpremote-server pip-installed
+    into it (presence of the entry-point exe is the cheapest reliable
+    signal). False on missing venv OR populated-with-only-stdlib venv
+    (e.g. one that setup.ps1 just created at step 1 but never finished
+    populating because -SkipInstall was passed)."""
+    return (repo_root / ".venv" / "Scripts" / "blpremote-server.exe").exists()
+
+
 def build_start_command(
     repo_root: Path,
     coord_target: Optional[str] = "mac",
-    skip_install: bool = True,
+    skip_install: Optional[bool] = None,
 ) -> list[str]:
-    """Argv for Popen-ing setup.ps1. -SkipInstall by default since
-    the UI launch path assumes setup ran once already; the script's
-    /health short-circuit handles the already-up case anyway."""
+    """Argv for Popen-ing setup.ps1.
+
+    skip_install policy:
+      None (default) -> auto-detect via venv_has_blpremote_server.
+        Skip on populated venv (steady state); install on empty/missing
+        venv (very first launch in a fresh checkout, where setup.ps1
+        step 1 will create the venv and step 3 needs to populate it
+        before step 5's uvicorn launch can import blpremote_server).
+      True / False    -> explicit override; honoured as-is.
+
+    The auto-detect default fixes the M10.5-era bug where a hard-coded
+    True caused the first-ever Start click on a fresh checkout to
+    create an empty venv, skip pip, then crash uvicorn at /health
+    timeout because blpremote_server wasn't installed."""
+    if skip_install is None:
+        skip_install = venv_has_blpremote_server(repo_root)
     setup = repo_root / "setup.ps1"
     cmd: list[str] = [
         "powershell.exe",

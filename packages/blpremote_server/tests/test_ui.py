@@ -161,26 +161,81 @@ class TestStartButtonState:
         assert start_button_state("happy") == "normal"
 
 
-# 7. Command builders — pure argv shaping (chunk c).
+# 7. Command builders — pure argv shaping (M9 chunk c + M10.7 fix).
 class TestBuildStartCommand:
-    def test_default_includes_force_skipinstall_and_coordsend(self, tmp_path):
+    @staticmethod
+    def _populate_venv_indicator(repo_root: Path) -> None:
+        """Mimic a venv that's been pip install -e blpremote-server'd
+        by dropping the entry-point .exe at the path the auto-detect
+        helper checks."""
+        scripts = repo_root / ".venv" / "Scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (scripts / "blpremote-server.exe").write_bytes(b"")
+
+    def test_auto_detect_skips_install_when_venv_has_deps(self, tmp_path):
+        """Steady-state: venv already populated -> setup.ps1's slow
+        pip step is unnecessary on every Start click."""
+        self._populate_venv_indicator(tmp_path)
         cmd = build_start_command(tmp_path)
         assert cmd[0] == "powershell.exe"
-        assert "-NoProfile" in cmd
-        assert "-File" in cmd
-        # The setup.ps1 path is passed as the next arg after -File.
         assert cmd[cmd.index("-File") + 1] == str(tmp_path / "setup.ps1")
         assert "-Force" in cmd
-        assert "-SkipInstall" in cmd
+        assert "-SkipInstall" in cmd  # populated -> can skip
         assert cmd[-2:] == ["-CoordSend", "mac"]
 
-    def test_skip_install_false_drops_the_flag(self, tmp_path):
+    def test_auto_detect_runs_install_when_venv_missing(self, tmp_path):
+        """First-ever launch in a fresh checkout: no .venv at all.
+        Auto-detect MUST omit -SkipInstall so step 3 of setup.ps1
+        actually populates the venv it just created in step 1.
+        Regression guard for the M10.7 bug."""
+        cmd = build_start_command(tmp_path)
+        assert "-SkipInstall" not in cmd
+
+    def test_auto_detect_runs_install_when_venv_empty(self, tmp_path):
+        """Half-finished setup.ps1 left an empty venv (Scripts dir
+        exists but blpremote-server.exe missing because pip was
+        skipped). Re-Start should trigger install, not skip again."""
+        (tmp_path / ".venv" / "Scripts").mkdir(parents=True)
+        cmd = build_start_command(tmp_path)
+        assert "-SkipInstall" not in cmd
+
+    def test_explicit_skip_install_true_overrides_auto_detect(self, tmp_path):
+        """Caller can force-skip even on an empty venv (e.g. for
+        scripted flows where they know what they're doing)."""
+        cmd = build_start_command(tmp_path, skip_install=True)
+        assert "-SkipInstall" in cmd
+
+    def test_explicit_skip_install_false_overrides_auto_detect(self, tmp_path):
+        """Caller can force-install even on a populated venv (e.g.
+        post-pull when they know deps need refreshing)."""
+        self._populate_venv_indicator(tmp_path)
         cmd = build_start_command(tmp_path, skip_install=False)
         assert "-SkipInstall" not in cmd
 
     def test_no_coord_target_drops_coord_args(self, tmp_path):
         cmd = build_start_command(tmp_path, coord_target=None)
         assert "-CoordSend" not in cmd
+
+
+class TestVenvHasBlpremoteServer:
+    def test_no_venv_at_all(self, tmp_path):
+        from blpremote_server.ui import venv_has_blpremote_server
+
+        assert venv_has_blpremote_server(tmp_path) is False
+
+    def test_empty_venv(self, tmp_path):
+        from blpremote_server.ui import venv_has_blpremote_server
+
+        (tmp_path / ".venv" / "Scripts").mkdir(parents=True)
+        assert venv_has_blpremote_server(tmp_path) is False
+
+    def test_populated_venv(self, tmp_path):
+        from blpremote_server.ui import venv_has_blpremote_server
+
+        scripts = tmp_path / ".venv" / "Scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "blpremote-server.exe").write_bytes(b"")
+        assert venv_has_blpremote_server(tmp_path) is True
 
 
 class TestBuildStopCommand:
