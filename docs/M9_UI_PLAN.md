@@ -26,6 +26,22 @@ purely a friendlier shell over the existing `RemoteHost` and
 `blpremote-ask` surfaces. No new IR ops, no new auth surface — just
 ergonomics.
 
+## Mockups
+
+Real Tkinter renders of both windows, captured 2026-05-12. No
+behaviour — pure widget tree, ttk `clam` theme, IBKR-style
+restraint. Source scripts live at `tools/m9_mockups/` and can be
+re-rendered locally with `python tools/m9_mockups/server_ui_preview.py`
+or `client_ui_preview.py`.
+
+**Windows server UI** — `tools/blpremote-server-ui.py` (win):
+
+![server UI mockup](screenshots/m9-server-ui-mockup.png)
+
+**macOS client UI** — `tools/blpremote-client-ui.py` (mac):
+
+![client UI mockup](screenshots/m9-client-ui-mockup.png)
+
 ## Tiers (preferred → fallback)
 
 ### Tier A — Standalone `.exe` / `.app` (Krishna's ideal)
