@@ -1,16 +1,16 @@
 """Build the bloom-connect app icon.
 
-Design (v2):
-- Charcoal squircle background (#1f2328, GitHub Primer dark — reads
-  cleanly in both light + dark Dock).
+Design (v3, Bloomberg Terminal palette per krishna):
+- Pure black background — the iconic dark trading-screen feel.
 - "Bc" monogram, set tight, lowercase c — the brand initials.
-- White B + green c (#2ea043, matches LED_COLOUR['happy'] in the
-  UI). The c carries the live-connection accent that the v1 dead
-  LED dot used to carry; now it's part of the letterform rather
-  than floating beside it.
+- Amber B (#FFB000, the Terminal function-key label tone) + orange
+  c (#FE9F00, the Bloomberg signature orange). Two-amber palette
+  references the Terminal typography directly.
 - Bold sans (Helvetica Neue Bold from the system) — heavy weight
   reads at 16×16 in Finder list view; lighter weights muddy.
-- No Bloomberg orange (trademark hazard, krishna's hard rule).
+- Bloomberg colour usage is descriptive (fair use for an
+  interop-targeted tool); we don't use the Bloomberg name or logo
+  in the icon. README already disclaims affiliation.
 
 Output:
 - icon_{16,32,64,128,256,512,1024}.png in docs/icons/png/
@@ -36,9 +36,9 @@ ICONSET = HERE / "bloom-connect.iconset"
 ICNS = HERE / "bloom-connect.icns"
 ICO = HERE / "bloom-connect.ico"
 
-BG = (0x1f, 0x23, 0x28, 0xff)
-WHITE = (0xff, 0xff, 0xff, 0xff)
-GREEN = (0x2e, 0xa0, 0x43, 0xff)
+BG = (0x00, 0x00, 0x00, 0xff)     # pure black, the Terminal screen
+AMBER = (0xff, 0xb0, 0x00, 0xff)  # Terminal function-key amber
+ORANGE = (0xfe, 0x9f, 0x00, 0xff) # Bloomberg signature orange
 
 # Helvetica Neue Bold ships with macOS; index 1 is typically Bold
 # in the .ttc. Falls back to Arial Black if absent.
@@ -103,8 +103,8 @@ def build(size: int) -> Image.Image:
     # Align c to the baseline of B — c sits lower because lowercase.
     cy = by + (bh - ch) - bc[1] + bb[1]
 
-    d.text((bx, by), "B", font=font, fill=WHITE)
-    d.text((cx, cy), "c", font=font, fill=GREEN)
+    d.text((bx, by), "B", font=font, fill=AMBER)
+    d.text((cx, cy), "c", font=font, fill=ORANGE)
 
     return img
 
