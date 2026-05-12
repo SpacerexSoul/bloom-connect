@@ -15,6 +15,9 @@ import pytest
 
 from blpremote_server.ui import (
     LED_COLOUR,
+    build_send_url_command,
+    build_start_command,
+    build_stop_command,
     detect_bloomberg,
     parse_health,
     probe_jwt,
@@ -148,3 +151,57 @@ class TestStartButtonState:
 
     def test_enabled_only_when_bbg_happy(self):
         assert start_button_state("happy") == "normal"
+
+
+# 7. Command builders — pure argv shaping (chunk c).
+class TestBuildStartCommand:
+    def test_default_includes_force_skipinstall_and_coordsend(self, tmp_path):
+        cmd = build_start_command(tmp_path)
+        assert cmd[0] == "powershell.exe"
+        assert "-NoProfile" in cmd
+        assert "-File" in cmd
+        # The setup.ps1 path is passed as the next arg after -File.
+        assert cmd[cmd.index("-File") + 1] == str(tmp_path / "setup.ps1")
+        assert "-Force" in cmd
+        assert "-SkipInstall" in cmd
+        assert cmd[-2:] == ["-CoordSend", "mac"]
+
+    def test_skip_install_false_drops_the_flag(self, tmp_path):
+        cmd = build_start_command(tmp_path, skip_install=False)
+        assert "-SkipInstall" not in cmd
+
+    def test_no_coord_target_drops_coord_args(self, tmp_path):
+        cmd = build_start_command(tmp_path, coord_target=None)
+        assert "-CoordSend" not in cmd
+
+
+class TestBuildStopCommand:
+    def test_default_targets_port_8000(self):
+        cmd = build_stop_command()
+        assert cmd[0] == "powershell.exe"
+        assert any("LocalPort 8000" in arg for arg in cmd)
+        assert any("Get-Process ngrok" in arg for arg in cmd)
+        # Sentinel write-host so the user sees "stop: complete" in
+        # the logs tail when the kill cycle finishes.
+        assert any("stop: complete" in arg for arg in cmd)
+
+    def test_custom_port(self):
+        cmd = build_stop_command(port=9001)
+        assert any("LocalPort 9001" in arg for arg in cmd)
+        assert not any("LocalPort 8000" in arg for arg in cmd)
+
+
+class TestBuildSendUrlCommand:
+    def test_uses_file_to_avoid_shell_quoting(self, tmp_path):
+        msg_file = tmp_path / "msg.txt"
+        cmd = build_send_url_command(
+            venv_python=r"C:\venv\python.exe",
+            coord_script=tmp_path / "tools" / "coord.py",
+            target="mac",
+            message_file=msg_file,
+        )
+        assert cmd[0] == r"C:\venv\python.exe"
+        assert cmd[-3:] == ["mac", "--file", str(msg_file)]
+        assert "send" in cmd
+        # No raw body in argv — that's the whole point of the file.
+        assert not any("server up at" in arg for arg in cmd)

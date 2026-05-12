@@ -153,6 +153,73 @@ def start_button_state(bbg_state: str) -> str:
     return "normal" if bbg_state == "happy" else "disabled"
 
 
+# --- Command builders (pure; tests live in test_ui.py) --------------
+
+
+def build_start_command(
+    repo_root: Path,
+    coord_target: Optional[str] = "mac",
+    skip_install: bool = True,
+) -> list[str]:
+    """Argv for Popen-ing setup.ps1. -SkipInstall by default since
+    the UI launch path assumes setup ran once already; the script's
+    /health short-circuit handles the already-up case anyway."""
+    setup = repo_root / "setup.ps1"
+    cmd: list[str] = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", str(setup),
+        "-Force",  # restart if /health says healthy (we want fresh logs)
+    ]
+    if skip_install:
+        cmd.append("-SkipInstall")
+    if coord_target:
+        cmd.extend(["-CoordSend", coord_target])
+    return cmd
+
+
+def build_stop_command(port: int = 8000) -> list[str]:
+    """Argv for Popen-ing a PowerShell one-liner that kills whatever
+    is listening on the chosen port + any ngrok process. Brute-force
+    by design: setup.ps1 spawns uvicorn + ngrok as detached children
+    so we can't track them via the Popen handle that started them."""
+    snippet = (
+        f"Get-NetTCPConnection -LocalPort {port} -State Listen "
+        "-ErrorAction SilentlyContinue | "
+        "ForEach-Object { Stop-Process -Id $_.OwningProcess -Force "
+        "-ErrorAction SilentlyContinue }; "
+        "Get-Process ngrok -ErrorAction SilentlyContinue | "
+        "Stop-Process -Force -ErrorAction SilentlyContinue; "
+        "Write-Host 'stop: complete'"
+    )
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-Command", snippet,
+    ]
+
+
+def build_send_url_command(
+    venv_python: str,
+    coord_script: Path,
+    target: str,
+    message_file: Path,
+) -> list[str]:
+    """Argv for invoking tools/coord.py to post a message. Body is
+    file-driven so PowerShell parens / em-dashes / unicode in the
+    URL don't get mangled by shell quoting."""
+    return [
+        venv_python,
+        str(coord_script),
+        "send",
+        target,
+        "--file",
+        str(message_file),
+    ]
+
+
 # --- Controller -----------------------------------------------------
 # Tkinter import deferred to inside the controller so the module is
 # importable + testable on hosts without Tk display.
@@ -167,6 +234,8 @@ class ServerUIController:
 
     REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
     NGROK_URL_FILE = REPO_ROOT / ".coord" / "last_ngrok_url.txt"
+    COORD_SCRIPT = REPO_ROOT / "tools" / "coord.py"
+    MAC_TARGET = "mac"
 
     def __init__(self) -> None:
         import tkinter as tk
@@ -245,15 +314,20 @@ class ServerUIController:
         for row in (self.row_bbg, self.row_server, self.row_jwt, self.row_ngrok):
             self._set_row(row, "unknown", "probing…")
 
-        # Background probe loop
+        # Background probe loop + log streaming queue (chunk c).
         self._probe_q: "queue.Queue[dict[str, Any]]" = queue.Queue()
+        self._logs_q: "queue.Queue[str]" = queue.Queue()
         self._stop_event = threading.Event()
         self._probe_thread = threading.Thread(
             target=self._probe_loop, daemon=True, name="status-probe"
         )
         self._probe_thread.start()
         self.root.after(self.DRAIN_INTERVAL_MS, self._drain_probe_queue)
+        self.root.after(self.DRAIN_INTERVAL_MS, self._drain_logs_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Subprocess handles tracked so we can avoid stomping ourselves.
+        self._active_proc: Optional[subprocess.Popen] = None
 
         self._append_log("UI started — status block polling every 2s.")
 
@@ -327,15 +401,109 @@ class ServerUIController:
             self._set_row(self.row_ngrok, "unhappy", "no URL published")
             self.url_var.set("")
 
-    # --- Stub callbacks (chunk c wires for real) -------------------
+    # --- Button callbacks (chunk c) --------------------------------
     def _on_start(self) -> None:
-        self._append_log("[stub] Start Server pressed — chunk (c) wires setup.ps1 Popen")
+        # Fast-path: if /health is already happy, don't re-spawn.
+        # Per Mac's chunk-(a) review nit + plan adef805 §"State machine".
+        state, text = probe_server()
+        if state == "happy":
+            self._append_log(f"[start] /health = {text} — already running, no relaunch")
+            return
+        if self._active_proc is not None and self._active_proc.poll() is None:
+            self._append_log("[start] another start is already in flight — ignoring")
+            return
+        cmd = build_start_command(self.REPO_ROOT, coord_target=self.MAC_TARGET)
+        self._append_log(f"[start] {' '.join(cmd[:5])} ... -CoordSend {self.MAC_TARGET}")
+        self._spawn_streaming(cmd, prefix="setup", retain=True)
 
     def _on_stop(self) -> None:
-        self._append_log("[stub] Stop Server pressed — chunk (c) wires Stop-Process")
+        cmd = build_stop_command(port=8000)
+        self._append_log("[stop] killing port-8000 listener + ngrok")
+        self._spawn_streaming(cmd, prefix="stop", retain=False)
 
     def _on_send_url(self) -> None:
-        self._append_log("[stub] Send URL to Mac pressed — chunk (c) wires coord.py send")
+        url = self.url_var.get().strip()
+        if not url:
+            self._append_log("[send-url] no URL to send (ngrok probe is unhappy)")
+            return
+        # Body via temp file so any unicode / parens in the URL don't
+        # get mangled by shell quoting.
+        import tempfile
+        body = f"server up at {url} (manual re-send from server UI)"
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".txt", delete=False
+        ) as tf:
+            tf.write(body)
+            tmp_path = Path(tf.name)
+        cmd = build_send_url_command(
+            venv_python=sys.executable,
+            coord_script=self.COORD_SCRIPT,
+            target=self.MAC_TARGET,
+            message_file=tmp_path,
+        )
+        self._append_log(f"[send-url] coord.py send {self.MAC_TARGET} ...")
+        # File cleanup runs after the subprocess completes — wire as a
+        # post-exit hook on the streaming thread.
+        self._spawn_streaming(
+            cmd, prefix="send-url", retain=False, on_exit=lambda: tmp_path.unlink(missing_ok=True)
+        )
+
+    # --- Subprocess streaming helper -------------------------------
+    def _spawn_streaming(
+        self,
+        cmd: list[str],
+        prefix: str,
+        retain: bool = False,
+        on_exit: Optional[Any] = None,
+    ) -> None:
+        """Popen the command, stream stdout/stderr lines into the
+        logs queue (drained by main thread). Set retain=True to
+        track the Popen as `self._active_proc` so the UI can refuse
+        overlapping starts."""
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+                text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except FileNotFoundError as exc:
+            self._append_log(f"[{prefix}] failed to spawn: {exc}")
+            return
+        if retain:
+            self._active_proc = proc
+
+        def _pump() -> None:
+            try:
+                if proc.stdout:
+                    for line in proc.stdout:
+                        self._logs_q.put(f"[{prefix}] {line.rstrip()}")
+            except Exception as exc:
+                self._logs_q.put(f"[{prefix}] stream error: {exc!r}")
+            finally:
+                rc = proc.wait()
+                self._logs_q.put(f"[{prefix}] exit {rc}")
+                if retain and self._active_proc is proc:
+                    self._active_proc = None
+                if on_exit is not None:
+                    try:
+                        on_exit()
+                    except Exception as exc:
+                        self._logs_q.put(f"[{prefix}] on_exit failed: {exc!r}")
+
+        threading.Thread(target=_pump, daemon=True, name=f"{prefix}-pump").start()
+
+    def _drain_logs_queue(self) -> None:
+        """Main-thread drain: pull subprocess output into the logs widget."""
+        try:
+            while True:
+                self._append_log(self._logs_q.get_nowait())
+        except queue.Empty:
+            pass
+        if not self._stop_event.is_set():
+            self.root.after(self.DRAIN_INTERVAL_MS, self._drain_logs_queue)
 
     def _on_copy_url(self) -> None:
         url = self.url_var.get()
