@@ -147,6 +147,55 @@ def read_ngrok_url(path: Path) -> tuple[str, str]:
     return ("unhappy", "")
 
 
+# --- Settings-dialog helpers (M10 item 5) ---------------------------
+
+
+def read_pairing_code(path: Path) -> Optional[str]:
+    """Return setup.ps1's stashed pairing code, or None if absent.
+    Same BOM-tolerance as read_ngrok_url."""
+    try:
+        if path.exists():
+            code = path.read_text(encoding="utf-8-sig").strip()
+            return code or None
+    except OSError:
+        pass
+    return None
+
+
+def regenerate_jwt_secret(path: Path) -> str:
+    """Write a new 64-char base64 secret to the user-only secret
+    file and return it. Mirrors setup.ps1 chunk (c)'s gen path so
+    the server picks up the same shape on next boot. Caller is
+    responsible for surfacing 'restart server to apply' to the user."""
+    import secrets
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_secret = secrets.token_urlsafe(48)  # 64 chars, URL-safe
+    path.write_text(new_secret, encoding="utf-8")
+    # Best-effort POSIX perms; on Windows os.chmod is mostly a no-op
+    # but the parent dir is %USERPROFILE% which is user-isolated.
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return new_secret
+
+
+def ngrok_authtoken_status(cfg_path: Path) -> tuple[str, str]:
+    """Probe the ngrok yml (same path setup.ps1 chunk b checks).
+    Returns (state, label) ready for the Settings dialog row."""
+    import re
+
+    try:
+        if cfg_path.exists():
+            text = cfg_path.read_text(encoding="utf-8-sig")
+            if re.search(r"(?m)^\s*authtoken:", text):
+                return ("happy", "Configured")
+    except OSError:
+        pass
+    return ("unhappy", "Missing")
+
+
 def start_button_state(bbg_state: str) -> str:
     """Pure: gate the [Start Server] button on the BBG probe result.
     Per M9 plan adef805 option (a): only enabled when BBG detected."""
@@ -234,8 +283,11 @@ class ServerUIController:
 
     REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
     NGROK_URL_FILE = REPO_ROOT / ".coord" / "last_ngrok_url.txt"
+    PAIRING_CODE_FILE = REPO_ROOT / ".coord" / "last_pairing_code.txt"
     COORD_SCRIPT = REPO_ROOT / "tools" / "coord.py"
     MAC_TARGET = "mac"
+    SECRET_FILE = Path.home() / ".blpremote" / "server_secret.txt"
+    NGROK_CFG = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ngrok" / "ngrok.yml"
 
     def __init__(self) -> None:
         import tkinter as tk
@@ -293,6 +345,12 @@ class ServerUIController:
             btns, text="Send URL to Mac", width=18, command=self._on_send_url
         )
         self.btn_send_url.pack(side="left")
+        # Settings on the right edge so the action triple stays visually
+        # primary; the gear glyph is U+2699 which clam renders cleanly.
+        self.btn_settings = ttk.Button(
+            btns, text="⚙ Settings", width=12, command=self._on_open_settings
+        )
+        self.btn_settings.pack(side="right")
 
         # Logs tail
         logs_frame = ttk.LabelFrame(self.root, text="Logs")
@@ -448,6 +506,30 @@ class ServerUIController:
             cmd, prefix="send-url", retain=False, on_exit=lambda: tmp_path.unlink(missing_ok=True)
         )
 
+    def _on_open_settings(self) -> None:
+        """Open the Settings modal. M10 item 5 mirror of mac's
+        client-side _open_settings_dialog. All actions are real, no
+        stub placeholders."""
+        _open_settings_dialog(
+            parent=self.root,
+            secret_file=self.SECRET_FILE,
+            ngrok_cfg=self.NGROK_CFG,
+            pairing_code_file=self.PAIRING_CODE_FILE,
+            ngrok_exe=self._resolve_ngrok_exe(),
+            log=self._append_log,
+        )
+
+    def _resolve_ngrok_exe(self) -> Optional[Path]:
+        """Same search order as setup.ps1 chunk (a). None if not found."""
+        candidates = [
+            self.REPO_ROOT / "tools" / "ngrok" / "ngrok.exe",
+            self.REPO_ROOT / "tools" / "ngrok.exe",
+        ]
+        for p in candidates:
+            if p.exists():
+                return p
+        return None
+
     # --- Subprocess streaming helper -------------------------------
     def _spawn_streaming(
         self,
@@ -528,6 +610,166 @@ class ServerUIController:
     def run(self) -> int:
         self.root.mainloop()
         return 0
+
+
+def _open_settings_dialog(  # pragma: no cover (Tkinter)
+    parent: Any,
+    secret_file: Path,
+    ngrok_cfg: Path,
+    pairing_code_file: Path,
+    ngrok_exe: Optional[Path],
+    log: Any,
+) -> None:
+    """Modal Settings dialog. Mirrors mac client UI's
+    ``_open_settings_dialog`` shape but the fields are server-side
+    concerns: pairing code (display + copy + regen), JWT secret
+    (status + regen), ngrok authtoken (status + set)."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    dlg = tk.Toplevel(parent)
+    dlg.title("Settings")
+    dlg.transient(parent)
+    dlg.grab_set()
+    dlg.geometry("520x360")
+    dlg.resizable(False, False)
+
+    main = ttk.Frame(dlg, padding=14)
+    main.pack(fill="both", expand=True)
+
+    msg_var = tk.StringVar(value="")
+
+    # ── Pairing code ────────────────────────────────────────────
+    pair_frame = ttk.LabelFrame(main, text="Pairing code (hand to client)")
+    pair_frame.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 12))
+    code = read_pairing_code(pairing_code_file) or ""
+    pair_var = tk.StringVar(value=code)
+    pair_entry = ttk.Entry(pair_frame, textvariable=pair_var, state="readonly")
+    pair_entry.pack(side="left", fill="x", expand=True, padx=(6, 4), pady=6)
+
+    def do_copy_pair():
+        if not pair_var.get():
+            msg_var.set("no pairing code on file -- run setup.ps1 to create the first user")
+            return
+        dlg.clipboard_clear()
+        dlg.clipboard_append(pair_var.get())
+        msg_var.set("pairing code copied to clipboard")
+        log("[settings] pairing code copied to clipboard")
+
+    ttk.Button(pair_frame, text="Copy", width=8, command=do_copy_pair).pack(
+        side="left", padx=(0, 6), pady=6
+    )
+
+    # ── JWT secret ──────────────────────────────────────────────
+    jwt_state, jwt_text = probe_jwt()
+    ttk.Label(main, text="JWT secret", width=18, anchor="w").grid(
+        row=1, column=0, sticky="w", pady=4
+    )
+    jwt_status_var = tk.StringVar(value=jwt_text)
+    ttk.Label(main, textvariable=jwt_status_var, anchor="w").grid(
+        row=1, column=1, sticky="w", pady=4
+    )
+
+    def do_regen_jwt():
+        try:
+            new_secret = regenerate_jwt_secret(secret_file)
+        except Exception as e:
+            msg_var.set(f"jwt regen failed: {type(e).__name__}: {e}")
+            return
+        jwt_status_var.set("Regenerated -- restart server to apply")
+        msg_var.set(
+            f"new secret written to {secret_file} ({len(new_secret)} chars). "
+            "uvicorn won't pick it up until you Stop + Start."
+        )
+        log(f"[settings] regenerated JWT secret -> {secret_file} (restart pending)")
+
+    ttk.Button(main, text="Regenerate", width=12, command=do_regen_jwt).grid(
+        row=1, column=2, padx=(8, 0), sticky="e", pady=4
+    )
+
+    # ── ngrok authtoken ─────────────────────────────────────────
+    auth_state, auth_text = ngrok_authtoken_status(ngrok_cfg)
+    ttk.Label(main, text="ngrok authtoken", width=18, anchor="w").grid(
+        row=2, column=0, sticky="w", pady=4
+    )
+    auth_status_var = tk.StringVar(value=auth_text)
+    ttk.Label(main, textvariable=auth_status_var, anchor="w").grid(
+        row=2, column=1, sticky="w", pady=4
+    )
+
+    def do_set_authtoken():
+        if ngrok_exe is None:
+            msg_var.set("ngrok.exe not found in tools/ -- run setup.ps1 to install it first")
+            return
+        # Open the dashboard for the user, then ask for the token.
+        try:
+            import webbrowser
+
+            webbrowser.open("https://dashboard.ngrok.com/get-started/your-authtoken")
+        except Exception:
+            pass
+        # Use a small sub-modal for the token paste rather than
+        # tkinter.simpledialog (which trips a focus quirk on some
+        # Win10 themes).
+        token_dlg = tk.Toplevel(dlg)
+        token_dlg.title("Set ngrok authtoken")
+        token_dlg.transient(dlg)
+        token_dlg.grab_set()
+        token_dlg.geometry("420x110")
+        token_dlg.resizable(False, False)
+        ttk.Label(token_dlg, text="Paste authtoken from the dashboard:").pack(
+            padx=12, pady=(12, 4), anchor="w"
+        )
+        tok_var = tk.StringVar()
+        ttk.Entry(token_dlg, textvariable=tok_var, width=50).pack(padx=12, fill="x")
+
+        def apply_token():
+            token = tok_var.get().strip()
+            if not token:
+                token_dlg.destroy()
+                return
+            try:
+                cp = subprocess.run(
+                    [str(ngrok_exe), "config", "add-authtoken", token],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if cp.returncode != 0:
+                    raise RuntimeError(cp.stderr.strip() or f"exit {cp.returncode}")
+            except Exception as e:
+                msg_var.set(f"add-authtoken failed: {type(e).__name__}: {e}")
+                token_dlg.destroy()
+                return
+            new_state, new_text = ngrok_authtoken_status(ngrok_cfg)
+            auth_status_var.set(new_text)
+            msg_var.set("ngrok authtoken saved -- restart server to refresh tunnel")
+            log("[settings] ngrok authtoken saved (restart pending for new tunnel)")
+            token_dlg.destroy()
+
+        btns_t = ttk.Frame(token_dlg)
+        btns_t.pack(fill="x", padx=12, pady=(8, 12))
+        ttk.Button(btns_t, text="Cancel", width=10, command=token_dlg.destroy).pack(
+            side="right", padx=(6, 0)
+        )
+        ttk.Button(btns_t, text="Save", width=10, command=apply_token).pack(side="right")
+        token_dlg.wait_window()
+
+    ttk.Button(main, text="Set...", width=12, command=do_set_authtoken).grid(
+        row=2, column=2, padx=(8, 0), sticky="e", pady=4
+    )
+
+    # ── Status message ──────────────────────────────────────────
+    ttk.Label(main, textvariable=msg_var, foreground="#666", wraplength=480).grid(
+        row=3, column=0, columnspan=3, sticky="w", pady=(14, 0)
+    )
+
+    # ── Close ───────────────────────────────────────────────────
+    btns = ttk.Frame(main)
+    btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(18, 0))
+    ttk.Button(btns, text="Close", width=10, command=dlg.destroy).pack(side="right")
+
+    main.columnconfigure(1, weight=1)
+    dlg.wait_window()
 
 
 def main() -> int:
