@@ -133,14 +133,44 @@ if ($listening) {
     Write-Step "4/6" "port $Port free" "Green"
 }
 
-# 4b. M5(A): default-secret guard. setup.ps1 is a dev bring-up; if
-# the caller hasn't picked a real BLPREMOTE_SECRET_KEY and hasn't
-# explicitly chosen on ALLOW_DEFAULT_SECRET, opt the process into
-# the loud-warning sentinel path so the server boots. Production
-# deployments set BLPREMOTE_SECRET_KEY upstream and skip this branch.
-if (-not $env:BLPREMOTE_SECRET_KEY -and -not $env:BLPREMOTE_ALLOW_DEFAULT_SECRET) {
-    $env:BLPREMOTE_ALLOW_DEFAULT_SECRET = "true"
-    Write-Host "      BLPREMOTE_ALLOW_DEFAULT_SECRET=true (dev opt-in; set BLPREMOTE_SECRET_KEY to silence)" -ForegroundColor Yellow
+# 4b. JWT secret bootstrap (M10 chunk c). Replaces the prior
+# ALLOW_DEFAULT_SECRET dev opt-in: setup.ps1 now generates a real
+# crypto-random secret on first run and reuses it on subsequent
+# runs. The secret lives at %USERPROFILE%\.blpremote\server_secret.txt
+# with an ACL locked to the current user; it is never displayed to
+# the console. Result: a fresh-install user gets production-grade
+# JWT signing without any manual env-var setup.
+if (-not $env:BLPREMOTE_SECRET_KEY) {
+    $secretFile = Join-Path $env:USERPROFILE ".blpremote\server_secret.txt"
+    $secretDir = Split-Path -Parent $secretFile
+    if (-not (Test-Path $secretDir)) {
+        New-Item -ItemType Directory -Path $secretDir -Force | Out-Null
+    }
+    if (Test-Path $secretFile) {
+        $env:BLPREMOTE_SECRET_KEY = (Get-Content $secretFile -Raw -Encoding utf8).Trim()
+        Write-Host "      JWT secret loaded from $secretFile" -ForegroundColor Gray
+    } else {
+        # 48 random bytes -> 64 base64 chars. The Cng RNG is the
+        # platform crypto source; this is the same primitive .NET
+        # uses for Cookie protection / ASP.NET data protection.
+        $bytes = New-Object byte[] 48
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $secret = [Convert]::ToBase64String($bytes)
+        $secret | Out-File -FilePath $secretFile -Encoding utf8 -NoNewline
+        # ACL: drop inherited perms, grant only current user read+write.
+        # icacls failures are non-fatal -- the file is in $USERPROFILE
+        # which already has user-only perms by default; this is just
+        # belt-and-braces in case the user has weird inheritance.
+        try {
+            icacls $secretFile /inheritance:r /grant:r "$($env:USERNAME):(R,W)" 2>&1 | Out-Null
+        } catch { }
+        $env:BLPREMOTE_SECRET_KEY = $secret
+        Write-Host "      generated new JWT secret -> $secretFile (user-only ACL)" -ForegroundColor Cyan
+    }
+    # Belt-and-braces: clear the M5(A) dev opt-in flag if it was set
+    # in this process by a previous (now-superseded) setup.ps1 run.
+    # The server should treat the new secret as production-grade.
+    Remove-Item Env:BLPREMOTE_ALLOW_DEFAULT_SECRET -ErrorAction SilentlyContinue
 }
 
 # 5. Start uvicorn detached
