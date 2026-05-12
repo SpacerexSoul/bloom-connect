@@ -27,6 +27,8 @@ Optional deps:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import queue
@@ -45,6 +47,47 @@ LED_COLOUR = {
     "unhappy":   "#cf222e",  # Not running · Down · Disconnected · Error
     "unknown":   "#8b8d91",  # Pre-first-poll
 }
+
+
+# ── Pairing code (M10) ───────────────────────────────────────────────
+# Host's setup script emits one base64-JSON string that bundles URL +
+# user + pass; client pastes it once in Settings instead of typing
+# three fields. Plain base64 — local-network or one-shot trusted-channel
+# sharing, not for public posting. Documented in M10_ONBOARDING_PLAN.md.
+
+PAIRING_CODE_VERSION = 1
+
+
+def encode_pairing_code(url: str, user: str, password: str) -> str:
+    """Encode {url, user, pass} into a single base64-JSON string the
+    host hands the client. Host-side helper; mac client mostly uses
+    decode (below), but the function lives here so both packages can
+    import from a single source of truth."""
+    payload = {"v": PAIRING_CODE_VERSION, "url": url.rstrip("/"), "user": user, "pass": password}
+    return base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+
+def decode_pairing_code(code: str) -> Optional[dict[str, str]]:
+    """Decode a pairing string back to {url, user, password} or
+    return None if it's malformed / wrong version / missing fields.
+    Never raises — UI uses the None return to show a friendly error."""
+    if not code or not isinstance(code, str):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(code.strip().encode("ascii"))
+        data = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("v") != PAIRING_CODE_VERSION:
+        return None
+    url = data.get("url")
+    user = data.get("user")
+    pwd = data.get("pass")
+    if not (isinstance(url, str) and isinstance(user, str) and isinstance(pwd, str)):
+        return None
+    return {"url": url, "user": user, "password": pwd}
 
 
 @dataclass
@@ -274,7 +317,7 @@ def _open_settings_dialog(parent, controller: ClientController, on_saved):  # pr
     dlg.title("Settings")
     dlg.transient(parent)
     dlg.grab_set()
-    dlg.geometry("440x290")
+    dlg.geometry("460x420")
     dlg.resizable(False, False)
 
     cur = controller.get_identity()
@@ -283,33 +326,58 @@ def _open_settings_dialog(parent, controller: ClientController, on_saved):  # pr
     main = ttk.Frame(dlg, padding=14)
     main.pack(fill="both", expand=True)
 
-    ttk.Label(main, text="Server URL", width=14, anchor="w").grid(row=0, column=0, sticky="w", pady=4)
-    url_var = tk.StringVar(value=cur["url"])
-    ttk.Entry(main, textvariable=url_var, width=34).grid(row=0, column=1, sticky="we", pady=4)
+    # ── Pairing code (fast path) ────────────────────────────────
+    # The host emits a single string with URL/user/pass bundled
+    # together; pasting it here fills the three fields below. Avoids
+    # the "did I type the URL right?" friction.
+    pair_frame = ttk.LabelFrame(main, text="Pairing code (paste from host)")
+    pair_frame.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 12))
+    pair_var = tk.StringVar()
+    pair_entry = ttk.Entry(pair_frame, textvariable=pair_var, width=38)
+    pair_entry.pack(side="left", fill="x", expand=True, padx=(6, 4), pady=6)
 
-    ttk.Label(main, text="Username", width=14, anchor="w").grid(row=1, column=0, sticky="w", pady=4)
-    user_var = tk.StringVar(value=cur["username"])
-    ttk.Entry(main, textvariable=user_var, width=34).grid(row=1, column=1, sticky="we", pady=4)
+    def do_paste_pairing():
+        decoded = decode_pairing_code(pair_var.get())
+        if decoded is None:
+            msg_var.set("invalid pairing code — check you copied the whole string")
+            return
+        url_var.set(decoded["url"])
+        user_var.set(decoded["user"])
+        pass_var.set(decoded["password"])
+        pair_var.set("")
+        msg_var.set("pairing code applied — review and click Save")
 
-    ttk.Label(main, text="Password", width=14, anchor="w").grid(row=2, column=0, sticky="w", pady=4)
-    pass_var = tk.StringVar(value="")
-    pass_entry = ttk.Entry(main, textvariable=pass_var, show="•", width=34)
-    pass_entry.grid(row=2, column=1, sticky="we", pady=4)
-    ttk.Label(main, text="(blank = keep current)", foreground="#666").grid(
-        row=3, column=1, sticky="w"
+    ttk.Button(pair_frame, text="Apply", width=8, command=do_paste_pairing).pack(
+        side="left", padx=(0, 6), pady=6
     )
 
-    ttk.Label(main, text="OpenRouter key", width=14, anchor="w").grid(row=4, column=0, sticky="w", pady=(10, 4))
+    ttk.Label(main, text="Server URL", width=14, anchor="w").grid(row=1, column=0, sticky="w", pady=4)
+    url_var = tk.StringVar(value=cur["url"])
+    ttk.Entry(main, textvariable=url_var, width=34).grid(row=1, column=1, sticky="we", pady=4)
+
+    ttk.Label(main, text="Username", width=14, anchor="w").grid(row=2, column=0, sticky="w", pady=4)
+    user_var = tk.StringVar(value=cur["username"])
+    ttk.Entry(main, textvariable=user_var, width=34).grid(row=2, column=1, sticky="we", pady=4)
+
+    ttk.Label(main, text="Password", width=14, anchor="w").grid(row=3, column=0, sticky="w", pady=4)
+    pass_var = tk.StringVar(value="")
+    pass_entry = ttk.Entry(main, textvariable=pass_var, show="•", width=34)
+    pass_entry.grid(row=3, column=1, sticky="we", pady=4)
+    ttk.Label(main, text="(blank = keep current)", foreground="#666").grid(
+        row=4, column=1, sticky="w"
+    )
+
+    ttk.Label(main, text="OpenRouter key", width=14, anchor="w").grid(row=5, column=0, sticky="w", pady=(10, 4))
     key_var = tk.StringVar(value="")
-    ttk.Entry(main, textvariable=key_var, show="•", width=34).grid(row=4, column=1, sticky="we", pady=(10, 4))
+    ttk.Entry(main, textvariable=key_var, show="•", width=34).grid(row=5, column=1, sticky="we", pady=(10, 4))
     status_msg = "set — blank = keep current" if has_key else "not set — paste sk-or-... to enable LLM"
     ttk.Label(main, text=f"({status_msg})", foreground="#666").grid(
-        row=5, column=1, sticky="w"
+        row=6, column=1, sticky="w"
     )
 
     msg_var = tk.StringVar(value="")
-    ttk.Label(main, textvariable=msg_var, foreground="#cf222e").grid(
-        row=6, column=0, columnspan=2, sticky="w", pady=(10, 0)
+    ttk.Label(main, textvariable=msg_var, foreground="#666").grid(
+        row=7, column=0, columnspan=2, sticky="w", pady=(10, 0)
     )
 
     def do_save():
@@ -339,7 +407,7 @@ def _open_settings_dialog(parent, controller: ClientController, on_saved):  # pr
         dlg.destroy()
 
     btns = ttk.Frame(main)
-    btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
+    btns.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
     ttk.Button(btns, text="Cancel", width=10, command=dlg.destroy).pack(side="right", padx=(6, 0))
     ttk.Button(btns, text="Save", width=10, command=do_save).pack(side="right")
 

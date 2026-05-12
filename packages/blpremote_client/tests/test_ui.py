@@ -20,6 +20,8 @@ from blpremote_client.ui import (
     LED_COLOUR,
     _format_execute,
     _format_plan,
+    decode_pairing_code,
+    encode_pairing_code,
 )
 from blpremote_client.llm import LLMPlanResponse, _PlanWithoutAuth
 from blpremote_client.models import (
@@ -106,6 +108,62 @@ class TestIdentityProbe:
     def test_missing_file_returns_empty(self, tmp_path):
         ctrl = ClientController(identity_path=tmp_path / "absent.json")
         assert ctrl.get_identity() == {"username": "", "url": ""}
+
+
+class TestPairingCode:
+    """Host emits one base64-JSON string; client pastes it once.
+    Replaces typing three fields by hand. Round-trip + every failure
+    mode must yield None (never raise) so the UI can show a friendly
+    error."""
+
+    def test_roundtrip(self):
+        code = encode_pairing_code("https://x.example/", "mac", "secret-pw")
+        decoded = decode_pairing_code(code)
+        assert decoded == {"url": "https://x.example", "user": "mac", "password": "secret-pw"}
+
+    def test_url_trailing_slash_stripped_on_encode(self):
+        code = encode_pairing_code("https://x/", "mac", "p")
+        assert decode_pairing_code(code)["url"] == "https://x"
+
+    def test_decode_handles_whitespace(self):
+        code = encode_pairing_code("https://x", "mac", "p")
+        # User might paste with leading/trailing whitespace from clipboard.
+        assert decode_pairing_code("   " + code + "\n  ") is not None
+
+    def test_decode_empty_returns_none(self):
+        assert decode_pairing_code("") is None
+        assert decode_pairing_code("   ") is None
+
+    def test_decode_garbage_returns_none(self):
+        # Not base64
+        assert decode_pairing_code("not a real code!") is None
+
+    def test_decode_valid_base64_but_not_json_returns_none(self):
+        import base64
+        bad = base64.urlsafe_b64encode(b"not json").decode("ascii")
+        assert decode_pairing_code(bad) is None
+
+    def test_decode_wrong_version_returns_none(self):
+        import base64, json
+        payload = json.dumps({"v": 99, "url": "x", "user": "u", "pass": "p"}).encode("utf-8")
+        code = base64.urlsafe_b64encode(payload).decode("ascii")
+        assert decode_pairing_code(code) is None
+
+    def test_decode_missing_field_returns_none(self):
+        import base64, json
+        payload = json.dumps({"v": 1, "url": "x", "user": "u"}).encode("utf-8")  # no pass
+        code = base64.urlsafe_b64encode(payload).decode("ascii")
+        assert decode_pairing_code(code) is None
+
+    def test_decode_wrong_type_returns_none(self):
+        import base64, json
+        payload = json.dumps({"v": 1, "url": "x", "user": 123, "pass": "p"}).encode("utf-8")
+        code = base64.urlsafe_b64encode(payload).decode("ascii")
+        assert decode_pairing_code(code) is None
+
+    def test_decode_non_string_arg_returns_none(self):
+        # Defensive — UI shouldn't pass None but if it does, no crash.
+        assert decode_pairing_code(None) is None  # type: ignore[arg-type]
 
 
 class TestSaveSettings:

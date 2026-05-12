@@ -1,260 +1,347 @@
+<div align="center">
+
 # bloom-connect
 
-Remote Bloomberg API access from macOS via a Windows host running
-Bloomberg Terminal. The Windows box runs a FastAPI server in front
-of `blpapi`; the Mac client sends validated IR plans over HTTPS
-(typically via an ngrok tunnel) and gets shaped responses back.
+**Remote Bloomberg API access from macOS, through a thin server on the Windows box where Bloomberg Terminal actually runs.**
 
-No `blpapi` install on the Mac. No arbitrary code execution on the
-server — every request is a Pydantic-validated execution plan
-against a locked IR contract.
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)](#)
+[![Tests](https://img.shields.io/badge/tests-348%20passing-green)](#)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Status](https://img.shields.io/badge/status-9%2F9%20milestones-success)](.coord/PLAN.md)
+
+</div>
+
+---
+
+## The pitch
+
+Bloomberg Terminal runs on Windows. You don't. `bloom-connect` puts a small,
+validated FastAPI server in front of `blpapi` on the Windows host, exposes it
+over an ngrok tunnel, and ships a Mac client that talks to it like a normal
+Python SDK — pandas DataFrames, polars LazyFrames, streaming subscriptions,
+and a natural-language → IR plan helper if you want it.
 
 ```
 ┌─────────────────────────────┐         ┌──────────────────────────────┐
 │  macOS client               │  HTTPS  │  Windows server              │
 │                             │ ───────►│                              │
-│  RemoteHost + IR plan       │         │  blpapi.Session lifecycle    │
-│  pandas/polars wrappers     │ ◄───────│  per-corr-id dispatch        │
-│  NL→IR via LLM (optional)   │         │  schema cache · audit log    │
-│  Tkinter Connect window     │         │  /metrics · rate limit       │
+│  RemoteHost · IR plan       │         │  blpapi.Session lifecycle    │
+│  pandas / polars wrappers   │ ◄───────│  per-corr-id dispatch        │
+│  NL → IR via LLM (optional) │         │  schema cache · audit log    │
+│  Tkinter Connect window     │         │  /metrics · per-user limits  │
 └─────────────────────────────┘         └──────────────────────────────┘
 ```
 
-## Status
+Zero `blpapi` install on the Mac. Zero arbitrary-code execution on the
+server — every request is a Pydantic-validated `ExecutionPlan` against
+a locked IR contract.
 
-All nine milestones from the revamp shipped. See
-[`.coord/PLAN.md`](.coord/PLAN.md) for the scoreboard and
-[`docs/`](docs/) for the per-milestone contracts and guides.
+---
 
-| Milestone | Title                                                        |
-|-----------|--------------------------------------------------------------|
-| M1        | Long-lived session, reconnect, sub PoC                        |
-| M2        | Generalised IR + schema cache + dispatcher                    |
-| M3        | SSE streaming subscriptions                                   |
-| M4        | Audit log + Prometheus `/metrics` + request cache             |
-| M5        | JWT secret hardening + per-user rate limit + identity         |
-| M6        | One-shot `setup.ps1` server bring-up                          |
-| M7        | pandas/polars DataFrame wrappers                              |
-| M8        | LLM-assisted query builder (NL → IR via OpenRouter)           |
-| M9        | Desktop Connect UI per side (in flight at time of writing)    |
+## Why it exists
+
+- **Bloomberg sits on Windows.** Your dev tooling, your data science stack,
+  your model code — most of that lives on macOS or Linux. Rather than dual-boot
+  or VM-hop, run a small server on the Bloomberg machine and call it from
+  wherever you actually work.
+- **Networks are messy.** University firewalls, locked-down trading floors,
+  guest Wi-Fi — direct sockets are a pain. ngrok's reserved-domain tunnel
+  collapses the network problem into one URL that holds across restarts.
+- **The model boundary is the trust boundary.** The server only accepts
+  Pydantic-validated execution plans against an allowlisted IR contract.
+  There's no `eval`, no shell, no `place_order` op. A misbehaving client
+  cannot make the server route a trade — because that surface doesn't exist.
+
+---
+
+## Use cases
+
+| Scenario | What you do |
+|---|---|
+| **Research notebooks** | `from blpremote_client import RemoteHost; bdh(host, "AAPL US Equity", "PX_LAST", ...)` from your Mac. Plot in matplotlib like any other data. |
+| **DataFrames-first analysis** | `pd_history(host, [...], [...], start, end)` returns a wide pandas frame, MultiIndex columns. Polars long-form via `pl_history(...)`. |
+| **Streaming dashboards** | `for tick in subscribe(host, "AAPL US Equity", "LAST_PRICE,BID,ASK"): ...` — SSE under the hood, typed exceptions on auth/network failures. |
+| **Natural-language exploration** | `ask(host, "AAPL last price")` → an IR plan you can review before executing. Routes through OpenRouter; default `deepseek/deepseek-chat` ≈ $0.0001 per call. |
+| **Cross-machine dev workflows** | The same coord channel that bootstraps the system carries messages between dev sessions — useful when the server and client live on different OSes. |
+
+**Read-only by design.** No order routing, no trade execution. The IR
+contract does not contain an op for it; the model layer refuses prompts
+that ask for it. Research, learning, prototyping — that's the scope.
 
 ---
 
 ## Quick start
 
-### Windows server
-
-1. Install Bloomberg Terminal + log in.
-2. Clone this repo, open a PowerShell window, and run:
-
-   ```powershell
-   .\setup.ps1 -CoordSend mac
-   ```
-
-3. Done. `setup.ps1` finds Python, creates `.venv`, installs
-   `blpapi` + the server package, starts uvicorn, starts ngrok,
-   waits for `/health`, and posts the public ngrok URL to the Mac
-   side via the coord channel.
-
-Useful flags: `-Force` to restart even when healthy, `-NoNgrok` for
-LAN-only deployment, `-SkipInstall` for a quick restart. Full
-walkthrough in [`docs/WINDOWS_SETUP.md`](docs/WINDOWS_SETUP.md).
-
 ### macOS client
+
+1. Download `Bloomberg Remote.dmg` from the latest release (or build it
+   yourself: `./scripts/build_mac_app.sh`).
+2. Open the `.dmg`, drag **Bloomberg Remote** to **Applications**, eject.
+3. Open it from Applications. Right-click → Open the first time to bypass
+   the unsigned-developer Gatekeeper warning (we're not paying for an
+   Apple Developer ID for a personal tool).
+4. The Settings dialog auto-opens on first launch. Paste a **pairing code**
+   from the host (or fill in URL / username / password manually), Save.
+5. Click **Connect** — green LED, you're talking to Bloomberg.
+
+CLI alternative if you'd rather skip the bundle:
 
 ```bash
 git clone <this repo> && cd bloom-connect
-./setup.sh
+./setup.sh             # finds python, venv, installs the client + deps
+                       # bootstraps ~/.blpremote/, prompts for OpenRouter key,
+                       # drops Connect.command on your Desktop
 ```
 
-`setup.sh` finds Python ≥3.10, creates `.venv`, installs
-`blpremote_client[llm,pandas,polars]`, bootstraps `~/.blpremote/`
-identity + OpenRouter key stubs, prompts for the OpenRouter key,
-and symlinks `Connect.command` to your Desktop.
+### Windows server
 
-Then double-click `~/Desktop/Connect.command` — the Tkinter window
-opens, server URL pre-filled from `~/.blpremote/identity.json`,
-click **Connect**.
+Prereq: Bloomberg Terminal installed and logged in. That's the only thing
+you have to install by hand.
 
-![client UI](docs/screenshots/m9-client-ui.png)
+```powershell
+git clone <this repo> ; cd bloom-connect
+.\setup.ps1 -CoordSend mac
+```
+
+`setup.ps1` finds Python, creates a venv, installs `blpapi` + the server
+package, starts uvicorn, starts ngrok, waits for `/health`, and posts the
+public ngrok URL to your Mac via the coord channel. Pass `-Force` to
+restart even when healthy; `-NoNgrok` for LAN-only deployment.
+
+Optional Server UI: double-click `START_SERVER_UI.bat` — Tkinter window
+shows status LEDs, ngrok URL with Copy button, Start/Stop/Send-URL
+buttons, scrolled logs.
 
 ---
 
-## Programmatic use (no UI)
+## Programmatic API
 
-The UI is a thin shell over `blpremote_client.RemoteHost`. Anything
-the UI does, you can script:
-
-### Reference data + history (dict API)
+The UIs are thin shells over the client SDK. Anything you can do in the
+window, you can script:
 
 ```python
 from blpremote_client import RemoteHost, px_last, ref_data
-from blpremote_client.data import bdh
+from blpremote_client.data import bdh, bds
+from blpremote_client.dataframes import pd_history, pl_history, pd_bars
+from blpremote_client.subscribe import subscribe
+from blpremote_client.llm import ask
 
 host = RemoteHost()  # reads ~/.blpremote/identity.json
 
+# Convenience
 print(px_last(host, "AAPL US Equity"))
 print(ref_data(host, ["AAPL US Equity", "MSFT US Equity"], ["PX_LAST", "VOLUME"]))
-print(bdh(host, "AAPL US Equity", "PX_LAST", "20260101", "20260131"))
-```
 
-### DataFrames (M7)
-
-```python
-from blpremote_client.dataframes import pd_history, pl_history, pd_bars, pl_ticks
-
+# Historical → DataFrame
 df = pd_history(host, ["AAPL US Equity", "MSFT US Equity"],
                 ["PX_LAST", "VOLUME"], "20260101", "20260131")
-# wide pandas frame, MultiIndex columns (security, field)
 
-lf = pl_history(host, "AAPL US Equity", "PX_LAST", "20260101", "20260131")
-# long polars frame: security · field · date · value
-```
+# Intraday bars
+bars = pd_bars(host, "AAPL US Equity", "TRADE",
+               "2026-05-08T14:00:00+00:00", "2026-05-08T20:00:00+00:00", interval=1)
 
-Both `[pandas]` and `[polars]` are optional extras. Each `pd_*` /
-`pl_*` helper lazily imports its dep and raises a clear
-`ImportError` with the install hint if it's not there.
-
-### Streaming subscriptions (M3)
-
-```python
-from blpremote_client.subscribe import subscribe
-
+# Streaming
 for frame in subscribe(host, "AAPL US Equity", "LAST_PRICE,BID,ASK"):
     print(frame.fields)
-```
+    if some_condition: break
 
-SSE under the hood. Heartbeat pings filtered by default; pass
-`with_pings=True` to see them. Network / auth / 5xx are mapped to
-typed exceptions.
-
-### Natural language → IR (M8)
-
-```python
-from blpremote_client.llm import ask
-
+# Natural language → IR plan → confirm → execute
 out = ask(host, "AAPL last price")
-print(out["explain"])                # human-readable summary
-result = host.execute(out["plan"])   # same dispatcher as everywhere else
-print(result.data)
+print(out["explain"])
+result = host.execute(out["plan"])
 ```
 
-Default model is `deepseek/deepseek-chat` via OpenRouter
-(~$0.0001/call) — flip the `model=` kwarg to route to any other
-OpenRouter-exposed model when a hard prompt needs it. Full guide
-in [`docs/M8_LLM_GUIDE.md`](docs/M8_LLM_GUIDE.md). CLI:
+---
+
+## Architecture cliff notes
+
+- **IR contract (`docs/M2_IR_CONTRACT.md`).** Every request is an
+  `ExecutionPlan` — a list of allowlisted ops with Pydantic validation:
+  `start_session · open_service · create_request · set · append ·
+  send_request · collect_response`. Locked at protocol version 1.1.
+- **Session model.** Long-lived `blpapi.Session` per worker with
+  reconnect on transient failures; per-correlation-id queues dispatch
+  responses to the right caller.
+- **Schema cache.** Server-side LRU keyed on service name, ETag-validated;
+  client-side `RemoteHost.get_schema` cache makes second-and-onwards
+  calls sub-millisecond.
+- **Streaming.** Server-Sent Events on `/v1/subscribe`, single topic
+  per connection, ~25 s heartbeat ping. Client iterator filters pings
+  by default; typed exceptions for 401 / 5xx / connect errors.
+- **Request cache.** LRU + TTL keyed on `ir_hash`; identical replays
+  inside the TTL serve from cache in tens of ms instead of the 800ms
+  BBG round-trip. Counters on `/metrics`.
+- **Observability.** JSON structured logging, JSONL audit per request
+  (with `ir_hash`, `result_hash`, `cache_hit`), Prometheus `/metrics`,
+  per-user rate-limit counters labelled by user identity.
+- **Auth.** JWT bearer tokens; secret refuses default sentinel at boot
+  unless `BLPREMOTE_ALLOW_DEFAULT_SECRET=1`. Token-bucket rate limit
+  on `/v1/execute` (300/min × 30 burst). Identity file
+  `~/.blpremote/identity.json` shared by `RemoteHost` and the coord CLI.
+- **LLM auth-isolation.** The model emits a plan with no `auth` field
+  (`_PlanWithoutAuth` Pydantic shape); `ask()` injects the token
+  post-parse so the model never sees credentials. Tested as a security
+  invariant.
+
+---
+
+## Install & build
+
+### Run from source
 
 ```bash
-blpremote-ask "AAPL last price"
+# Mac client
+./setup.sh
+.venv/bin/python tools/blpremote-client-ui.py
+
+# Windows server
+.\setup.ps1
+START_SERVER_UI.bat
 ```
 
----
+### Build the macOS .app + .dmg installer
 
-## IR contract
-
-The Mac client never executes code on the server — it submits an
-`ExecutionPlan` (a list of allowlisted ops) that's validated and
-dispatched. Locked at protocol_version `1.1`; the full schema and
-op-by-op semantics live in
-[`docs/M2_IR_CONTRACT.md`](docs/M2_IR_CONTRACT.md).
-
-```json
-{
-  "protocol_version": "1.1",
-  "request_id": "uuid",
-  "auth": { "token": "..." },
-  "ops": [
-    { "op": "start_session" },
-    { "op": "open_service", "service": "//blp/refdata" },
-    { "op": "create_request", "service": "//blp/refdata",
-      "request": "ReferenceDataRequest", "id": "r1" },
-    { "op": "append", "id": "r1", "path": "securities",
-      "value": "AAPL US Equity" },
-    { "op": "append", "id": "r1", "path": "fields", "value": "PX_LAST" },
-    { "op": "send_request", "id": "r1", "correlation_id": "cid1" },
-    { "op": "collect_response", "correlation_id": "cid1", "timeout_ms": 10000 }
-  ]
-}
+```bash
+./scripts/build_mac_app.sh
+# → build_artifacts/dist/Bloomberg Remote.app       (~40 MB)
+# → build_artifacts/Bloomberg Remote.dmg            (~20 MB)
 ```
 
----
+The script uses a clean isolated `.venv-build` so PyInstaller doesn't
+pick up unrelated site-packages from system Python (a naïve build
+ballooned to 2 GB before this fix).
 
-## Server endpoints
+### Build the Windows .exe installer
 
-| Endpoint                             | Method | Purpose                                       |
-|--------------------------------------|--------|-----------------------------------------------|
-| `/health`                            | GET    | server + Bloomberg session status             |
-| `/version`                           | GET    | server version                                |
-| `/v1/auth/login`                     | POST   | username + password → bearer token            |
-| `/v1/execute`                        | POST   | run an ExecutionPlan                          |
-| `/v1/subscribe?topic=&fields=`       | GET    | SSE stream of market data frames              |
-| `/v1/schema/{service:path}`          | GET    | Bloomberg service schema (ETag-cached)        |
-| `/metrics`                           | GET    | Prometheus exposition                         |
-| `/v1/coord/send` · `/v1/coord/inbox` | both   | cross-machine dev coord channel               |
-
-`/v1/execute` returns an `ExecutionResult` shaped:
-
-```json
-{
-  "request_id": "rq-1",
-  "status": "ok",
-  "data": { ... },
-  "warnings": [ ... ],
-  "errors":   [ ... ],
-  "server_timing_ms": 42
-}
+```powershell
+.\scripts\build_win_exe.ps1
+# → build_artifacts\dist\Bloomberg Remote Server\
+# → build_artifacts\Bloomberg-Remote-Server-Setup.exe (with Inno Setup installed)
 ```
 
-`status` is `ok` / `partial` / `error`. Per-request error codes:
-
-| Code                       | Meaning                                                |
-|----------------------------|--------------------------------------------------------|
-| `AUTH_FAILED`              | invalid credentials or expired token                   |
-| `PLAN_INVALID`             | execution plan validation failed                       |
-| `BLP_SESSION_FAIL`         | Bloomberg session failed to start                      |
-| `BLP_TIMEOUT`              | request timed out                                      |
-| `BLP_SECURITY_ERROR`       | invalid security identifier                            |
-| `BLP_FIELD_ERROR`          | invalid field                                          |
-| `IR_DEPRECATED_OP`         | warning: deprecated op alias used                      |
-| `IR_UNVERIFIED_SERVICE`    | warning: service allowed but not in supported list     |
+Requires `choco install innosetup` on the build box.
 
 ---
 
-## Observability
+## Common questions
 
-- **Audit log** (M4-A): every executed plan is appended as JSONL to
-  `~/.blpremote/audit.log` with `ir_hash`, `result_hash`, and
-  `cache_hit` so you can diff identical replays. Server-side
-  structured JSON logging via the standard logger.
-- **Prometheus `/metrics`** (M4-B): request counters, latency
-  histograms, cache hit/miss counters, per-user rate-limit
-  counters. Routes labelled by template, not literal path, so
-  `/v1/schema/{service:path}` doesn't blow cardinality.
-- **Request cache** (M4-C): LRU+TTL keyed by `ir_hash`. Identical
-  replays inside the TTL serve from cache in ~40ms instead of the
-  ~800ms BBG round-trip. Counter `blpremote_request_cache_hits_total`
-  on `/metrics`.
+<details>
+<summary><b>Why ngrok, not just open a firewall port?</b></summary>
+
+University networks, locked-down corporate networks, and home routers
+all make direct sockets painful. ngrok's reserved-domain feature gives
+a stable HTTPS URL that holds across server restarts, with no firewall
+rules to maintain. The trade-off is the free-tier dependency; swap to
+Cloudflare Tunnel or a self-hosted tunnel if that's a concern.
+
+</details>
+
+<details>
+<summary><b>Can this place trades?</b></summary>
+
+**No.** There is no `place_order` op in the IR contract. The model
+layer (for natural-language queries) is explicitly instructed to
+refuse trade-execution prompts. The validator is the trust boundary —
+adding a trade op would require server-side code changes, server tests,
+and a protocol-version bump. This is research / learning / prototyping
+tooling.
+
+</details>
+
+<details>
+<summary><b>What about latency?</b></summary>
+
+Cold path: ngrok edge → Windows box → blpapi → BBG.
+Typical reference-data request: 200–500 ms wall clock, dominated by
+the BBG round-trip (server itself processes in 30–80 ms).
+Identical replays inside the TTL window: ~40 ms (request cache hit).
+Streaming: ~50 ms tick-to-client.
+
+This is not low-latency trading infrastructure. It's research tooling
+that talks to a terminal that talks to Bloomberg's backbone.
+
+</details>
+
+<details>
+<summary><b>Does the LLM see my Bloomberg credentials?</b></summary>
+
+No. The model emits a plan with a `_PlanWithoutAuth` shape — no `auth`
+field exists in the model's output schema, so it physically cannot
+include a token. `ask()` injects the caller's bearer token after the
+model returns, before the plan reaches `host.execute()`. There's a
+test (`test_llm_plan_shape_has_no_auth_field`) that asserts the auth
+field is absent; it fails loudly if anyone adds it.
+
+</details>
+
+<details>
+<summary><b>Which LLM model?</b></summary>
+
+Default: `deepseek/deepseek-chat` via OpenRouter. ≈ $0.0001 per call
+for the typical "AAPL last price"-shaped prompt. Override with
+`model=` for harder prompts (`anthropic/claude-haiku-4-5`,
+`openai/gpt-4o-mini`, etc — anything OpenRouter exposes). The IR
+fixer (`_normalise_array_paths`) deterministically corrects the one
+known drift mode where cheap models emit `set` for array fields.
+
+Full docs: `docs/M8_LLM_GUIDE.md`.
+
+</details>
+
+<details>
+<summary><b>I see <code>using insecure default JWT secret</code> at the server. Is that bad?</b></summary>
+
+Yes — set `BLPREMOTE_SECRET_KEY` to a real value in production, or
+opt into the default for dev with `BLPREMOTE_ALLOW_DEFAULT_SECRET=1`.
+The server refuses to boot with the default secret by default; this
+is by design (M5(A) hardening). Future M10 work auto-generates a
+random secret on first `setup.ps1` run.
+
+</details>
+
+<details>
+<summary><b>Is there a Linux client?</b></summary>
+
+The Mac client should run on Linux as-is (it's pure Python + Tkinter),
+but it's not tested and `setup.sh` is macOS-flavoured (Homebrew hints,
+`open` for the .command launcher). The `.app` bundling is Mac-specific;
+Linux users would run from source.
+
+</details>
+
+<details>
+<summary><b>Why two packages instead of one?</b></summary>
+
+`blpremote_client` has no `blpapi` dependency — it ships pure Python
++ httpx + pydantic. `blpremote_server` depends on `blpapi`, which is
+Windows-only and ~200 MB. Splitting them means a Mac install never
+needs Bloomberg's SDK; the Mac install set is 40 MB total bundled.
+
+</details>
 
 ---
 
-## Security
+## Development
 
-- **JWT secret hardening** (M5-A): server refuses to boot with the
-  default sentinel secret. Opt-in for dev convenience via
-  `BLPREMOTE_ALLOW_DEFAULT_SECRET=1`; opt-in to rotate-on-boot via
-  `BLPREMOTE_ROTATE_SECRET=1`. Production sets a real secret
-  through env or settings file.
-- **Per-user rate limit** (M5-B): token bucket on `/v1/execute`,
-  default 300 req/min × 30 burst. 429s carry a `Retry-After`
-  header. Counter `blpremote_rate_limited_total{user="..."}`.
-- **Identity consolidation** (M5-C): one `~/.blpremote/identity.json`
-  shared by `coord.py` + `RemoteHost`. Resolution priority is
-  kwargs > env (`BLPCOORD_URL` / `_USER` / `_PASS`) > file. Legacy
-  `coord.json` keeps reading for backwards compat.
-- **LLM context never sees a token** (M8): the model emits a plan
-  with no `auth` field (`_PlanWithoutAuth` Pydantic shape); `ask()`
-  injects `host._get_token()` post-parse. Tested as a security
-  invariant.
+```bash
+# Per-package (the project's actual testing pattern)
+pytest packages/blpremote_client/tests -q   # 179 + IR-fixer + UI tests
+pytest packages/blpremote_server/tests -q   # 175 + 5 skipped (Win-gated)
+
+# Lint / format
+ruff check . && black --check .
+```
+
+Tests are isolated per package — each has its own `conftest.py` that
+adds its own `src/` to `sys.path`. There's no top-level monorepo
+pytest config; running `pytest` from the repo root with both
+directories together hits a module-name collision (both packages have
+a `test_ui.py`).
+
+CI is intentionally out of scope. Two-person project, both sides
+verify before merging to `main`. The plan scoreboard at
+[`.coord/PLAN.md`](.coord/PLAN.md) records who verified what.
 
 ---
 
@@ -262,77 +349,41 @@ op-by-op semantics live in
 
 ```
 bloom-connect/
-├── README.md                              # this file
-├── setup.ps1                              # M6, Windows server one-shot
-├── setup.sh                               # M9, macOS client one-shot
-├── Connect.command                        # M9, macOS double-click launcher
+├── README.md                         # this file
+├── setup.ps1                         # Windows server one-shot bring-up
+├── setup.sh                          # macOS client one-shot bring-up
+├── Connect.command                   # macOS double-click launcher (client UI)
+├── START_SERVER_UI.bat               # Windows double-click launcher (server UI)
+├── scripts/
+│   ├── build_mac_app.sh              # PyInstaller + hdiutil → .app + .dmg
+│   └── build_win_exe.ps1             # PyInstaller + Inno Setup → .exe installer
 ├── packages/
-│   ├── blpremote_server/                  # FastAPI server (Windows side)
+│   ├── blpremote_server/             # FastAPI server (Windows side)
 │   │   └── src/blpremote_server/
-│   │       ├── app.py                     # routes
-│   │       ├── session.py                 # blpapi lifecycle + reconnect
+│   │       ├── app.py · session.py
 │   │       ├── audit.py · metrics.py · request_cache.py · rate_limit.py
-│   │       └── ...
-│   └── blpremote_client/                  # client SDK (macOS side)
+│   │       └── ui.py                 # Server Tkinter UI controller
+│   └── blpremote_client/             # client SDK (macOS side)
 │       └── src/blpremote_client/
-│           ├── host.py · models.py        # RemoteHost + IR shapes
-│           ├── data.py                    # bdh, bds, ref_data, etc.
-│           ├── dataframes.py              # pandas/polars wrappers
-│           ├── subscribe.py               # SSE iterator
-│           ├── llm.py                     # NL → IR ask()
-│           ├── cli.py                     # blpremote-ask
-│           └── ui.py                      # blpremote-ui (Tkinter)
+│           ├── host.py · models.py
+│           ├── data.py · dataframes.py · subscribe.py
+│           ├── llm.py · cli.py
+│           └── ui.py                 # Client Tkinter UI controller
 ├── tools/
-│   ├── coord.py                           # cross-machine dev channel
-│   ├── blpremote-client-ui.py             # thin entry, equiv to blpremote-ui
-│   └── m9_mockups/                        # design previews
+│   ├── coord.py                      # cross-machine dev channel
+│   ├── blpremote-client-ui.py        # client UI entry
+│   ├── blpremote-server-ui.py        # server UI entry
+│   └── m9_mockups/                   # design previews (throwaway)
 ├── docs/
-│   ├── M2_IR_CONTRACT.md                  # locked IR contract
-│   ├── M8_LLM_GUIDE.md                    # ask() + blpremote-ask deep dive
-│   ├── M9_UI_PLAN.md                      # UI design + state machine
-│   ├── NGROK_SETUP.md · WINDOWS_SETUP.md  # platform notes
+│   ├── M2_IR_CONTRACT.md             # locked IR contract
+│   ├── M8_LLM_GUIDE.md               # NL → IR deep-dive
+│   ├── M9_UI_PLAN.md                 # UI design + state machine
+│   ├── M10_ONBOARDING_PLAN.md        # installer + onboarding design
+│   ├── NGROK_SETUP.md · WINDOWS_SETUP.md
 │   └── screenshots/
 └── .coord/
-    └── PLAN.md                            # milestone scoreboard
+    └── PLAN.md                       # milestone scoreboard
 ```
-
----
-
-## Development
-
-```bash
-# Server tests (Windows side)
-pytest packages/blpremote_server/tests -q
-
-# Client tests (macOS side)
-pytest packages/blpremote_client/tests -q
-
-# Lint / format
-ruff check . && black --check .
-```
-
-CI is intentionally out of scope — this is a two-person project and
-both sides verify before merging to `main`. The plan scoreboard at
-[`.coord/PLAN.md`](.coord/PLAN.md) records who verified what.
-
----
-
-## Coord channel
-
-A small `/v1/coord/send` + `/v1/coord/inbox` pair on the server
-lets the Mac and Windows dev sessions talk to each other via the
-same FastAPI surface as everything else (bearer auth, identity
-file, JSONL audit). `tools/coord.py` is the CLI:
-
-```bash
-python tools/coord.py send win "your message"
-python tools/coord.py inbox       # drain
-python tools/coord.py watch       # tail (used by /loop)
-```
-
-It's how `setup.ps1 -CoordSend mac` auto-publishes the new ngrok
-URL after every restart — kills the "did you remember to update
-the URL" friction.
 
 ---
 
