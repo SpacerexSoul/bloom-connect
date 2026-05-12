@@ -173,6 +173,55 @@ if (-not $env:BLPREMOTE_SECRET_KEY) {
     Remove-Item Env:BLPREMOTE_ALLOW_DEFAULT_SECRET -ErrorAction SilentlyContinue
 }
 
+# 4c. First-user prompt (M10 chunk d). users.json is the single
+# source of truth for who can auth against this server. If empty
+# (fresh install) prompt for username + password and add via the
+# blpremote_server.auth UserStore (bcrypt-hashed). Stash username +
+# raw password in script scope so the pairing-code emit at the end
+# can hand both to the client side. We DO NOT log either.
+$usersJson = Join-Path $PSScriptRoot "users.json"
+$script:CreatedUser = $null
+$script:CreatedPass = $null
+$needsUser = $true
+if (Test-Path $usersJson) {
+    try {
+        $existing = Get-Content $usersJson -Raw -Encoding utf8 | ConvertFrom-Json
+        if ($existing -and ($existing.PSObject.Properties.Name.Count -gt 0)) {
+            $needsUser = $false
+        }
+    } catch { }
+}
+if ($needsUser) {
+    Write-Host ""
+    Write-Host "no users configured yet -- creating the first one" -ForegroundColor Cyan
+    $username = Read-Host -Prompt "      username for this host"
+    if ([string]::IsNullOrWhiteSpace($username)) {
+        throw "no username provided -- aborting"
+    }
+    $passwordSecure = Read-Host -Prompt "      password" -AsSecureString
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordSecure)
+    $password = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    if ([string]::IsNullOrEmpty($password)) {
+        throw "empty password -- aborting"
+    }
+    # Hand user/pass via env vars so the password never lands on the
+    # process command line (where it would be visible to other users
+    # via tasklist / Get-Process).
+    $env:BC_NEW_USER = $username
+    $env:BC_NEW_PASS = $password
+    try {
+        & $venvPy -c "import os, sys; sys.path.insert(0, 'packages/blpremote_server/src'); from blpremote_server.auth import UserStore; ok = UserStore('users.json').create_user(os.environ['BC_NEW_USER'], os.environ['BC_NEW_PASS']); raise SystemExit(0 if ok else 2)" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "user creation failed (exit $LASTEXITCODE)" }
+    } finally {
+        Remove-Item Env:BC_NEW_PASS -ErrorAction SilentlyContinue
+        Remove-Item Env:BC_NEW_USER -ErrorAction SilentlyContinue
+    }
+    $script:CreatedUser = $username
+    $script:CreatedPass = $password
+    Write-Host "      created user '$username' (hashed in users.json)" -ForegroundColor Green
+}
+
 # 5. Start uvicorn detached
 Write-Step "5/6" "starting uvicorn on 0.0.0.0:$Port"
 $uvLog = Join-Path $env:TEMP "blpremote-uvicorn.log"
@@ -302,6 +351,36 @@ if ($CoordSend) {
         }
         Remove-Item $tmp -ErrorAction SilentlyContinue
     }
+}
+
+# Pairing-code emit (M10 chunk e). When chunk (d) created a fresh
+# user, build {v:1, url, user, pass} JSON and base64 it into a
+# single token the client UI's Settings dialog accepts. Same shape
+# as blpremote_client.ui.decode_pairing_code(). Stash to
+# .coord/last_pairing_code.txt so the server UI's [Show Pairing
+# Code] button (M10 item 5) can re-display without re-prompting.
+if ($script:CreatedUser -and $publicUrl) {
+    $payloadObj = [ordered]@{
+        v    = 1
+        url  = $publicUrl
+        user = $script:CreatedUser
+        pass = $script:CreatedPass
+    }
+    $payloadJson = $payloadObj | ConvertTo-Json -Compress
+    $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
+    $pairingCode = [Convert]::ToBase64String($payloadBytes)
+    if (Test-Path $coordDir) {
+        $pairingCode | Out-File -FilePath (Join-Path $coordDir "last_pairing_code.txt") `
+            -Encoding utf8 -NoNewline
+    }
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "  PAIRING CODE (paste into client Settings dialog):" -ForegroundColor Cyan
+    Write-Host "  $pairingCode" -ForegroundColor White
+    Write-Host "============================================================" -ForegroundColor Cyan
+    # Wipe the raw password from script scope; the pairing code is
+    # the only object that should leave this process now.
+    $script:CreatedPass = $null
 }
 
 Write-Host ""
