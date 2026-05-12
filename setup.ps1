@@ -133,14 +133,93 @@ if ($listening) {
     Write-Step "4/6" "port $Port free" "Green"
 }
 
-# 4b. M5(A): default-secret guard. setup.ps1 is a dev bring-up; if
-# the caller hasn't picked a real BLPREMOTE_SECRET_KEY and hasn't
-# explicitly chosen on ALLOW_DEFAULT_SECRET, opt the process into
-# the loud-warning sentinel path so the server boots. Production
-# deployments set BLPREMOTE_SECRET_KEY upstream and skip this branch.
-if (-not $env:BLPREMOTE_SECRET_KEY -and -not $env:BLPREMOTE_ALLOW_DEFAULT_SECRET) {
-    $env:BLPREMOTE_ALLOW_DEFAULT_SECRET = "true"
-    Write-Host "      BLPREMOTE_ALLOW_DEFAULT_SECRET=true (dev opt-in; set BLPREMOTE_SECRET_KEY to silence)" -ForegroundColor Yellow
+# 4b. JWT secret bootstrap (M10 chunk c). Replaces the prior
+# ALLOW_DEFAULT_SECRET dev opt-in: setup.ps1 now generates a real
+# crypto-random secret on first run and reuses it on subsequent
+# runs. The secret lives at %USERPROFILE%\.blpremote\server_secret.txt
+# with an ACL locked to the current user; it is never displayed to
+# the console. Result: a fresh-install user gets production-grade
+# JWT signing without any manual env-var setup.
+if (-not $env:BLPREMOTE_SECRET_KEY) {
+    $secretFile = Join-Path $env:USERPROFILE ".blpremote\server_secret.txt"
+    $secretDir = Split-Path -Parent $secretFile
+    if (-not (Test-Path $secretDir)) {
+        New-Item -ItemType Directory -Path $secretDir -Force | Out-Null
+    }
+    if (Test-Path $secretFile) {
+        $env:BLPREMOTE_SECRET_KEY = (Get-Content $secretFile -Raw -Encoding utf8).Trim()
+        Write-Host "      JWT secret loaded from $secretFile" -ForegroundColor Gray
+    } else {
+        # 48 random bytes -> 64 base64 chars. The Cng RNG is the
+        # platform crypto source; this is the same primitive .NET
+        # uses for Cookie protection / ASP.NET data protection.
+        $bytes = New-Object byte[] 48
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $secret = [Convert]::ToBase64String($bytes)
+        $secret | Out-File -FilePath $secretFile -Encoding utf8 -NoNewline
+        # ACL: drop inherited perms, grant only current user read+write.
+        # icacls failures are non-fatal -- the file is in $USERPROFILE
+        # which already has user-only perms by default; this is just
+        # belt-and-braces in case the user has weird inheritance.
+        try {
+            icacls $secretFile /inheritance:r /grant:r "$($env:USERNAME):(R,W)" 2>&1 | Out-Null
+        } catch { }
+        $env:BLPREMOTE_SECRET_KEY = $secret
+        Write-Host "      generated new JWT secret -> $secretFile (user-only ACL)" -ForegroundColor Cyan
+    }
+    # Belt-and-braces: clear the M5(A) dev opt-in flag if it was set
+    # in this process by a previous (now-superseded) setup.ps1 run.
+    # The server should treat the new secret as production-grade.
+    Remove-Item Env:BLPREMOTE_ALLOW_DEFAULT_SECRET -ErrorAction SilentlyContinue
+}
+
+# 4c. First-user prompt (M10 chunk d). users.json is the single
+# source of truth for who can auth against this server. If empty
+# (fresh install) prompt for username + password and add via the
+# blpremote_server.auth UserStore (bcrypt-hashed). Stash username +
+# raw password in script scope so the pairing-code emit at the end
+# can hand both to the client side. We DO NOT log either.
+$usersJson = Join-Path $PSScriptRoot "users.json"
+$script:CreatedUser = $null
+$script:CreatedPass = $null
+$needsUser = $true
+if (Test-Path $usersJson) {
+    try {
+        $existing = Get-Content $usersJson -Raw -Encoding utf8 | ConvertFrom-Json
+        if ($existing -and ($existing.PSObject.Properties.Name.Count -gt 0)) {
+            $needsUser = $false
+        }
+    } catch { }
+}
+if ($needsUser) {
+    Write-Host ""
+    Write-Host "no users configured yet -- creating the first one" -ForegroundColor Cyan
+    $username = Read-Host -Prompt "      username for this host"
+    if ([string]::IsNullOrWhiteSpace($username)) {
+        throw "no username provided -- aborting"
+    }
+    $passwordSecure = Read-Host -Prompt "      password" -AsSecureString
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordSecure)
+    $password = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    if ([string]::IsNullOrEmpty($password)) {
+        throw "empty password -- aborting"
+    }
+    # Hand user/pass via env vars so the password never lands on the
+    # process command line (where it would be visible to other users
+    # via tasklist / Get-Process).
+    $env:BC_NEW_USER = $username
+    $env:BC_NEW_PASS = $password
+    try {
+        & $venvPy -c "import os, sys; sys.path.insert(0, 'packages/blpremote_server/src'); from blpremote_server.auth import UserStore; ok = UserStore('users.json').create_user(os.environ['BC_NEW_USER'], os.environ['BC_NEW_PASS']); raise SystemExit(0 if ok else 2)" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "user creation failed (exit $LASTEXITCODE)" }
+    } finally {
+        Remove-Item Env:BC_NEW_PASS -ErrorAction SilentlyContinue
+        Remove-Item Env:BC_NEW_USER -ErrorAction SilentlyContinue
+    }
+    $script:CreatedUser = $username
+    $script:CreatedPass = $password
+    Write-Host "      created user '$username' (hashed in users.json)" -ForegroundColor Green
 }
 
 # 5. Start uvicorn detached
@@ -171,10 +250,60 @@ if ($NoNgrok) {
     return
 }
 
-$ngrok = Join-Path $PSScriptRoot "tools\ngrok.exe"
+# Resolve ngrok binary, downloading if needed (M10 chunk a).
+# Search order:
+#   1. tools\ngrok\ngrok.exe (canonical install path)
+#   2. tools\ngrok.exe       (back-compat for manual installs)
+#   3. download from official mirror
+$ngrok = Join-Path $PSScriptRoot "tools\ngrok\ngrok.exe"
 if (-not (Test-Path $ngrok)) {
-    Write-Step "6/6" "tools\ngrok.exe missing -- install or pass -NoNgrok" "Yellow"
-    return
+    $ngrokAlt = Join-Path $PSScriptRoot "tools\ngrok.exe"
+    if (Test-Path $ngrokAlt) {
+        $ngrok = $ngrokAlt
+    } else {
+        Write-Step "6/6" "ngrok not found -- downloading from official mirror"
+        $ngrokDir = Join-Path $PSScriptRoot "tools\ngrok"
+        New-Item -ItemType Directory -Path $ngrokDir -Force | Out-Null
+        $zipPath = Join-Path $env:TEMP "ngrok-v3-windows.zip"
+        $dlUrl = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+        try {
+            # ProgressPreference=SilentlyContinue speeds Invoke-WebRequest
+            # ~10x on PS5 by skipping the progress-bar render.
+            $prevProgress = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+            Invoke-WebRequest -Uri $dlUrl -OutFile $zipPath -UseBasicParsing
+            $ProgressPreference = $prevProgress
+            Expand-Archive -Path $zipPath -DestinationPath $ngrokDir -Force
+        } finally {
+            Remove-Item $zipPath -ErrorAction SilentlyContinue
+        }
+        $ngrok = Join-Path $ngrokDir "ngrok.exe"
+        if (-not (Test-Path $ngrok)) {
+            throw "ngrok download succeeded but ngrok.exe not found in $ngrokDir"
+        }
+        $ver = (& $ngrok --version 2>&1 | Out-String).Trim()
+        Write-Host "      installed: $ver" -ForegroundColor Gray
+    }
+}
+
+# Authtoken bootstrap (M10 chunk b). ngrok 3 stores config at
+# $LOCALAPPDATA\ngrok\ngrok.yml on Windows. Probe the file directly
+# instead of `ngrok config check` (which returns 0 even without a
+# token, just warns to stderr). If absent, open the dashboard in the
+# user's browser and read the pasted token from the console.
+$ngrokCfg = Join-Path $env:LOCALAPPDATA "ngrok\ngrok.yml"
+$hasAuthToken = (Test-Path $ngrokCfg) -and `
+    ((Get-Content $ngrokCfg -Raw -ErrorAction SilentlyContinue) -match "(?m)^\s*authtoken:")
+if (-not $hasAuthToken) {
+    Write-Host "      ngrok needs an authtoken; opening dashboard..." -ForegroundColor Yellow
+    Start-Process "https://dashboard.ngrok.com/get-started/your-authtoken"
+    $token = Read-Host -Prompt "      paste your ngrok authtoken"
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        throw "no authtoken provided -- aborting (re-run setup.ps1 to retry)"
+    }
+    & $ngrok config add-authtoken $token.Trim() | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "ngrok config add-authtoken failed (exit $LASTEXITCODE)" }
+    Write-Host "      authtoken saved to $ngrokCfg" -ForegroundColor Green
 }
 
 # Reset any existing ngrok process so we get a fresh tunnel.
@@ -222,6 +351,36 @@ if ($CoordSend) {
         }
         Remove-Item $tmp -ErrorAction SilentlyContinue
     }
+}
+
+# Pairing-code emit (M10 chunk e). When chunk (d) created a fresh
+# user, build {v:1, url, user, pass} JSON and base64 it into a
+# single token the client UI's Settings dialog accepts. Same shape
+# as blpremote_client.ui.decode_pairing_code(). Stash to
+# .coord/last_pairing_code.txt so the server UI's [Show Pairing
+# Code] button (M10 item 5) can re-display without re-prompting.
+if ($script:CreatedUser -and $publicUrl) {
+    $payloadObj = [ordered]@{
+        v    = 1
+        url  = $publicUrl
+        user = $script:CreatedUser
+        pass = $script:CreatedPass
+    }
+    $payloadJson = $payloadObj | ConvertTo-Json -Compress
+    $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payloadJson)
+    $pairingCode = [Convert]::ToBase64String($payloadBytes)
+    if (Test-Path $coordDir) {
+        $pairingCode | Out-File -FilePath (Join-Path $coordDir "last_pairing_code.txt") `
+            -Encoding utf8 -NoNewline
+    }
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "  PAIRING CODE (paste into client Settings dialog):" -ForegroundColor Cyan
+    Write-Host "  $pairingCode" -ForegroundColor White
+    Write-Host "============================================================" -ForegroundColor Cyan
+    # Wipe the raw password from script scope; the pairing code is
+    # the only object that should leave this process now.
+    $script:CreatedPass = $null
 }
 
 Write-Host ""
