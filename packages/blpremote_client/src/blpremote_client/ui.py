@@ -582,6 +582,16 @@ def build_window(controller: ClientController):  # pragma: no cover (Tkinter)
     cancel_btn.configure(command=do_cancel)
 
     root.after(100, drain_queue)
+
+    # First-launch onboarding: if identity.json is missing or empty,
+    # the user has nothing to connect to. Auto-open Settings instead
+    # of leaving them staring at a blank URL field.
+    if not ident["url"] or not ident["username"]:
+        root.after(
+            300,
+            lambda: _open_settings_dialog(root, controller, refresh_identity_display),
+        )
+
     return root
 
 
