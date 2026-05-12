@@ -1,264 +1,341 @@
-# Bloomberg Remote BLPAPI Wrapper
+# bloom-connect
 
-Remote Bloomberg API execution from macOS via a Windows host running Bloomberg Terminal.
+Remote Bloomberg API access from macOS via a Windows host running
+Bloomberg Terminal. The Windows box runs a FastAPI server in front
+of `blpapi`; the Mac client sends validated IR plans over HTTPS
+(typically via an ngrok tunnel) and gets shaped responses back.
+
+No `blpapi` install on the Mac. No arbitrary code execution on the
+server — every request is a Pydantic-validated execution plan
+against a locked IR contract.
 
 ```
-┌─────────────────┐         ┌──────────────────────┐
-│  macOS Client   │  HTTP   │   Windows Server     │
-│  (Python code)  │ ──────► │  (Bloomberg + API)   │
-│                 │         │                      │
-│  Builds IR plan │         │  Executes via blpapi │
-│  No blpapi dep  │ ◄────── │  Returns results     │
-└─────────────────┘  JSON   └──────────────────────┘
+┌─────────────────────────────┐         ┌──────────────────────────────┐
+│  macOS client               │  HTTPS  │  Windows server              │
+│                             │ ───────►│                              │
+│  RemoteHost + IR plan       │         │  blpapi.Session lifecycle    │
+│  pandas/polars wrappers     │ ◄───────│  per-corr-id dispatch        │
+│  NL→IR via LLM (optional)   │         │  schema cache · audit log    │
+│  Tkinter Connect window     │         │  /metrics · rate limit       │
+└─────────────────────────────┘         └──────────────────────────────┘
 ```
 
-## Features
+## Status
 
-- **No Bloomberg dependency on macOS** - real `blpapi` only needed on Windows
-- **Two development APIs**: Convenience functions (`px_last()`) and Bloomberg-like proxy (`Session`/`Service`/`Request`)
-- **Secure**: Token-based auth, password hashing, validated execution plans
-- **Validated execution**: No arbitrary code execution - only allowlisted operations
+All nine milestones from the revamp shipped. See
+[`.coord/PLAN.md`](.coord/PLAN.md) for the scoreboard and
+[`docs/`](docs/) for the per-milestone contracts and guides.
+
+| Milestone | Title                                                        |
+|-----------|--------------------------------------------------------------|
+| M1        | Long-lived session, reconnect, sub PoC                        |
+| M2        | Generalised IR + schema cache + dispatcher                    |
+| M3        | SSE streaming subscriptions                                   |
+| M4        | Audit log + Prometheus `/metrics` + request cache             |
+| M5        | JWT secret hardening + per-user rate limit + identity         |
+| M6        | One-shot `setup.ps1` server bring-up                          |
+| M7        | pandas/polars DataFrame wrappers                              |
+| M8        | LLM-assisted query builder (NL → IR via OpenRouter)           |
+| M9        | Desktop Connect UI per side (in flight at time of writing)    |
 
 ---
 
-## macOS Setup (Client)
+## Quick start
 
-### Installation
+### Windows server
+
+1. Install Bloomberg Terminal + log in.
+2. Clone this repo, open a PowerShell window, and run:
+
+   ```powershell
+   .\setup.ps1 -CoordSend mac
+   ```
+
+3. Done. `setup.ps1` finds Python, creates `.venv`, installs
+   `blpapi` + the server package, starts uvicorn, starts ngrok,
+   waits for `/health`, and posts the public ngrok URL to the Mac
+   side via the coord channel.
+
+Useful flags: `-Force` to restart even when healthy, `-NoNgrok` for
+LAN-only deployment, `-SkipInstall` for a quick restart. Full
+walkthrough in [`docs/WINDOWS_SETUP.md`](docs/WINDOWS_SETUP.md).
+
+### macOS client
 
 ```bash
-cd packages/blpremote_client
-pip install -e .
-
-# Optional: pandas support for DataFrame output
-pip install -e ".[pandas]"
+git clone <this repo> && cd bloom-connect
+./setup.sh
 ```
 
-### Pair with Windows Host
+`setup.sh` finds Python ≥3.10, creates `.venv`, installs
+`blpremote_client[llm,pandas,polars]`, bootstraps `~/.blpremote/`
+identity + OpenRouter key stubs, prompts for the OpenRouter key,
+and symlinks `Connect.command` to your Desktop.
 
-Before first use, pair with your Windows Bloomberg server:
+Then double-click `~/Desktop/Connect.command` — the Tkinter window
+opens, server URL pre-filled from `~/.blpremote/identity.json`,
+click **Connect**.
 
-```python
-from blpremote_client import RemoteHost
+![client UI](docs/screenshots/m9-client-ui.png)
 
-host = RemoteHost("http://WINDOWS_IP:8000", username="krishna", password="your-password")
-if host.pair("krishna", "your-password"):
-    print("Pairing successful!")
-```
+---
 
-### Quick Start: Convenience API
+## Programmatic use (no UI)
+
+The UI is a thin shell over `blpremote_client.RemoteHost`. Anything
+the UI does, you can script:
+
+### Reference data + history (dict API)
 
 ```python
 from blpremote_client import RemoteHost, px_last, ref_data
+from blpremote_client.data import bdh
 
-host = RemoteHost("http://WINDOWS_IP:8000", username="krishna", password="...")
+host = RemoteHost()  # reads ~/.blpremote/identity.json
 
-# Get last price
-price = px_last(host, "IBM US Equity")
-print(f"IBM: {price}")
-
-# Get multiple fields
-data = ref_data(host, ["IBM US Equity", "AAPL US Equity"], ["PX_LAST", "NAME"])
-print(data)
+print(px_last(host, "AAPL US Equity"))
+print(ref_data(host, ["AAPL US Equity", "MSFT US Equity"], ["PX_LAST", "VOLUME"]))
+print(bdh(host, "AAPL US Equity", "PX_LAST", "20260101", "20260131"))
 ```
 
-### Bloomberg-like Proxy API
-
-For code that mirrors Bloomberg's actual API:
+### DataFrames (M7)
 
 ```python
-from blpremote_client.proxy import Session, SessionOptions
+from blpremote_client.dataframes import pd_history, pl_history, pd_bars, pl_ticks
 
-opts = SessionOptions()
-session = Session(opts, remote_host="http://WINDOWS_IP:8000", username="krishna", password="...")
+df = pd_history(host, ["AAPL US Equity", "MSFT US Equity"],
+                ["PX_LAST", "VOLUME"], "20260101", "20260131")
+# wide pandas frame, MultiIndex columns (security, field)
 
-session.start()
-session.openService("//blp/refdata")
-svc = session.getService("//blp/refdata")
-
-req = svc.createRequest("ReferenceDataRequest")
-req.getElement("securities").appendValue("IBM US Equity")
-req.getElement("fields").appendValue("PX_LAST")
-
-cid = session.sendRequest(req)
-result = session.collectResponse(cid)
-print(result.to_dict())
+lf = pl_history(host, "AAPL US Equity", "PX_LAST", "20260101", "20260131")
+# long polars frame: security · field · date · value
 ```
 
-### Troubleshooting (macOS)
+Both `[pandas]` and `[polars]` are optional extras. Each `pd_*` /
+`pl_*` helper lazily imports its dep and raises a clear
+`ImportError` with the install hint if it's not there.
 
-| Issue | Solution |
-|-------|----------|
-| `ConnectionError` | Check Windows IP, ensure firewall allows port 8000 |
-| `AuthenticationError` | Verify username/password, re-pair if needed |
-| `TimeoutError` | Increase timeout or check Windows server status |
-| Token expired | Client auto-refreshes; if issues, delete `~/.blpremote/tokens.json` |
+### Streaming subscriptions (M3)
+
+```python
+from blpremote_client.subscribe import subscribe
+
+for frame in subscribe(host, "AAPL US Equity", "LAST_PRICE,BID,ASK"):
+    print(frame.fields)
+```
+
+SSE under the hood. Heartbeat pings filtered by default; pass
+`with_pings=True` to see them. Network / auth / 5xx are mapped to
+typed exceptions.
+
+### Natural language → IR (M8)
+
+```python
+from blpremote_client.llm import ask
+
+out = ask(host, "AAPL last price")
+print(out["explain"])                # human-readable summary
+result = host.execute(out["plan"])   # same dispatcher as everywhere else
+print(result.data)
+```
+
+Default model is `deepseek/deepseek-chat` via OpenRouter
+(~$0.0001/call) — flip the `model=` kwarg to route to any other
+OpenRouter-exposed model when a hard prompt needs it. Full guide
+in [`docs/M8_LLM_GUIDE.md`](docs/M8_LLM_GUIDE.md). CLI:
+
+```bash
+blpremote-ask "AAPL last price"
+```
 
 ---
 
-## Windows Setup (Server)
+## IR contract
 
-### Prerequisites
-
-1. **Python 3.10+** installed (or Anaconda/Miniconda)
-2. **Bloomberg Terminal** installed and logged in
-3. **Bloomberg BLPAPI Python SDK** (`pip install blpapi`)
-
-### Installation
-
-```powershell
-cd packages\blpremote_server
-
-# Option 1: Standard venv
-pip install -e .
-
-# Option 2: Conda (recommended for university PCs)
-conda create -n bloomberg python=3.11
-conda activate bloomberg
-pip install fastapi uvicorn pydantic pydantic-settings python-jose passlib bcrypt
-```
-
-See [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) for detailed instructions.
-
-### University Networks (ngrok)
-
-If you can't configure the firewall (e.g., university PC), use ngrok:
-
-```powershell
-# Terminal 1: Start server on localhost
-python -m uvicorn blpremote_server.app:app --host 127.0.0.1 --port 8000
-
-# Terminal 2: Start ngrok tunnel
-.\tools\ngrok http 8000
-```
-
-This gives you a public URL like `https://abc123.ngrok-free.app` that works from anywhere.
-
-See [docs/NGROK_SETUP.md](docs/NGROK_SETUP.md) for full setup.
-
-### Direct Network Setup
-
-For direct network access:
-
-```powershell
-# Allow incoming connections (run as admin)
-New-NetFirewallRule -DisplayName "Bloomberg Remote" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
-
-# Start server
-python -m uvicorn blpremote_server.app:app --host 0.0.0.0 --port 8000
-```
-
-> ⚠️ **Security Warning**: Do not expose this server to the public internet without TLS and proper authentication.
-
----
-
-## API Reference
-
-### Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Server health check |
-| `/version` | GET | Server version |
-| `/v1/auth/login` | POST | Authenticate and get token |
-| `/v1/execute` | POST | Execute a Bloomberg operation plan |
-
-### Execution Plan Format
+The Mac client never executes code on the server — it submits an
+`ExecutionPlan` (a list of allowlisted ops) that's validated and
+dispatched. Locked at protocol_version `1.1`; the full schema and
+op-by-op semantics live in
+[`docs/M2_IR_CONTRACT.md`](docs/M2_IR_CONTRACT.md).
 
 ```json
 {
-  "protocol_version": "1.0",
+  "protocol_version": "1.1",
   "request_id": "uuid",
   "auth": { "token": "..." },
   "ops": [
     { "op": "start_session" },
     { "op": "open_service", "service": "//blp/refdata" },
-    { "op": "create_request", "service": "//blp/refdata", "request": "ReferenceDataRequest", "id": "req1" },
-    { "op": "append", "id": "req1", "path": "securities", "value": "IBM US Equity" },
-    { "op": "append", "id": "req1", "path": "fields", "value": "PX_LAST" },
-    { "op": "send_request", "id": "req1", "correlation_id": "cid1" },
-    { "op": "collect_refdata_response", "correlation_id": "cid1", "timeout_ms": 10000 }
+    { "op": "create_request", "service": "//blp/refdata",
+      "request": "ReferenceDataRequest", "id": "r1" },
+    { "op": "append", "id": "r1", "path": "securities",
+      "value": "AAPL US Equity" },
+    { "op": "append", "id": "r1", "path": "fields", "value": "PX_LAST" },
+    { "op": "send_request", "id": "r1", "correlation_id": "cid1" },
+    { "op": "collect_response", "correlation_id": "cid1", "timeout_ms": 10000 }
   ]
 }
 ```
 
-### Error Codes
+---
 
-| Code | Description |
-|------|-------------|
-| `AUTH_FAILED` | Invalid credentials or expired token |
-| `PLAN_INVALID` | Execution plan validation failed |
-| `BLP_SESSION_FAIL` | Bloomberg session failed to start |
-| `BLP_TIMEOUT` | Request timed out |
-| `BLP_SECURITY_ERROR` | Invalid security identifier |
-| `BLP_FIELD_ERROR` | Invalid field |
+## Server endpoints
+
+| Endpoint                             | Method | Purpose                                       |
+|--------------------------------------|--------|-----------------------------------------------|
+| `/health`                            | GET    | server + Bloomberg session status             |
+| `/version`                           | GET    | server version                                |
+| `/v1/auth/login`                     | POST   | username + password → bearer token            |
+| `/v1/execute`                        | POST   | run an ExecutionPlan                          |
+| `/v1/subscribe?topic=&fields=`       | GET    | SSE stream of market data frames              |
+| `/v1/schema/{service:path}`          | GET    | Bloomberg service schema (ETag-cached)        |
+| `/metrics`                           | GET    | Prometheus exposition                         |
+| `/v1/coord/send` · `/v1/coord/inbox` | both   | cross-machine dev coord channel               |
+
+`/v1/execute` returns an `ExecutionResult` shaped:
+
+```json
+{
+  "request_id": "rq-1",
+  "status": "ok",
+  "data": { ... },
+  "warnings": [ ... ],
+  "errors":   [ ... ],
+  "server_timing_ms": 42
+}
+```
+
+`status` is `ok` / `partial` / `error`. Per-request error codes:
+
+| Code                       | Meaning                                                |
+|----------------------------|--------------------------------------------------------|
+| `AUTH_FAILED`              | invalid credentials or expired token                   |
+| `PLAN_INVALID`             | execution plan validation failed                       |
+| `BLP_SESSION_FAIL`         | Bloomberg session failed to start                      |
+| `BLP_TIMEOUT`              | request timed out                                      |
+| `BLP_SECURITY_ERROR`       | invalid security identifier                            |
+| `BLP_FIELD_ERROR`          | invalid field                                          |
+| `IR_DEPRECATED_OP`         | warning: deprecated op alias used                      |
+| `IR_UNVERIFIED_SERVICE`    | warning: service allowed but not in supported list     |
+
+---
+
+## Observability
+
+- **Audit log** (M4-A): every executed plan is appended as JSONL to
+  `~/.blpremote/audit.log` with `ir_hash`, `result_hash`, and
+  `cache_hit` so you can diff identical replays. Server-side
+  structured JSON logging via the standard logger.
+- **Prometheus `/metrics`** (M4-B): request counters, latency
+  histograms, cache hit/miss counters, per-user rate-limit
+  counters. Routes labelled by template, not literal path, so
+  `/v1/schema/{service:path}` doesn't blow cardinality.
+- **Request cache** (M4-C): LRU+TTL keyed by `ir_hash`. Identical
+  replays inside the TTL serve from cache in ~40ms instead of the
+  ~800ms BBG round-trip. Counter `blpremote_request_cache_hits_total`
+  on `/metrics`.
+
+---
+
+## Security
+
+- **JWT secret hardening** (M5-A): server refuses to boot with the
+  default sentinel secret. Opt-in for dev convenience via
+  `BLPREMOTE_ALLOW_DEFAULT_SECRET=1`; opt-in to rotate-on-boot via
+  `BLPREMOTE_ROTATE_SECRET=1`. Production sets a real secret
+  through env or settings file.
+- **Per-user rate limit** (M5-B): token bucket on `/v1/execute`,
+  default 300 req/min × 30 burst. 429s carry a `Retry-After`
+  header. Counter `blpremote_rate_limited_total{user="..."}`.
+- **Identity consolidation** (M5-C): one `~/.blpremote/identity.json`
+  shared by `coord.py` + `RemoteHost`. Resolution priority is
+  kwargs > env (`BLPCOORD_URL` / `_USER` / `_PASS`) > file. Legacy
+  `coord.json` keeps reading for backwards compat.
+- **LLM context never sees a token** (M8): the model emits a plan
+  with no `auth` field (`_PlanWithoutAuth` Pydantic shape); `ask()`
+  injects `host._get_token()` post-parse. Tested as a security
+  invariant.
+
+---
+
+## Repository layout
+
+```
+bloom-connect/
+├── README.md                              # this file
+├── setup.ps1                              # M6, Windows server one-shot
+├── setup.sh                               # M9, macOS client one-shot
+├── Connect.command                        # M9, macOS double-click launcher
+├── packages/
+│   ├── blpremote_server/                  # FastAPI server (Windows side)
+│   │   └── src/blpremote_server/
+│   │       ├── app.py                     # routes
+│   │       ├── session.py                 # blpapi lifecycle + reconnect
+│   │       ├── audit.py · metrics.py · request_cache.py · rate_limit.py
+│   │       └── ...
+│   └── blpremote_client/                  # client SDK (macOS side)
+│       └── src/blpremote_client/
+│           ├── host.py · models.py        # RemoteHost + IR shapes
+│           ├── data.py                    # bdh, bds, ref_data, etc.
+│           ├── dataframes.py              # pandas/polars wrappers
+│           ├── subscribe.py               # SSE iterator
+│           ├── llm.py                     # NL → IR ask()
+│           ├── cli.py                     # blpremote-ask
+│           └── ui.py                      # blpremote-ui (Tkinter)
+├── tools/
+│   ├── coord.py                           # cross-machine dev channel
+│   ├── blpremote-client-ui.py             # thin entry, equiv to blpremote-ui
+│   └── m9_mockups/                        # design previews
+├── docs/
+│   ├── M2_IR_CONTRACT.md                  # locked IR contract
+│   ├── M8_LLM_GUIDE.md                    # ask() + blpremote-ask deep dive
+│   ├── M9_UI_PLAN.md                      # UI design + state machine
+│   ├── NGROK_SETUP.md · WINDOWS_SETUP.md  # platform notes
+│   └── screenshots/
+└── .coord/
+    └── PLAN.md                            # milestone scoreboard
+```
 
 ---
 
 ## Development
 
-### Run Tests
-
 ```bash
-# All tests
-pytest
+# Server tests (Windows side)
+pytest packages/blpremote_server/tests -q
 
-# Client only
-pytest packages/blpremote_client/tests -v
+# Client tests (macOS side)
+pytest packages/blpremote_client/tests -q
 
-# Server only
-pytest packages/blpremote_server/tests -v
+# Lint / format
+ruff check . && black --check .
 ```
 
-### Lint & Format
-
-```bash
-ruff check .
-black .
-```
-
-### Manual Smoke Test (requires Bloomberg)
-
-On macOS, with server running on Windows:
-
-```bash
-python tools/manual_smoke_test.py --host http://WINDOWS_IP:8000 --username krishna --password ...
-```
+CI is intentionally out of scope — this is a two-person project and
+both sides verify before merging to `main`. The plan scoreboard at
+[`.coord/PLAN.md`](.coord/PLAN.md) records who verified what.
 
 ---
 
-## Trading Strategies
+## Coord channel
 
-A dedicated `strategies/` directory contains proprietary trading strategies using the Bloomberg remote wrapper.
+A small `/v1/coord/send` + `/v1/coord/inbox` pair on the server
+lets the Mac and Windows dev sessions talk to each other via the
+same FastAPI surface as everything else (bearer auth, identity
+file, JSONL audit). `tools/coord.py` is the CLI:
 
-### Strategy 1: Algebraic Topology Market-Neutral
-
-Uses algebraic topology for market modeling - consistently profitable for 5 years including 2022.
-
-```python
-from blpremote_client import RemoteHost
-from strategies import AlgebraicTopologyStrategy
-
-host = RemoteHost("http://WINDOWS_IP:8000", username="krishna", password="...")
-
-strategy = AlgebraicTopologyStrategy()
-signals = strategy.run(host)
-
-# Position sizing for $1M portfolio
-positions = strategy.compute_positions(signals, portfolio_value=1_000_000)
+```bash
+python tools/coord.py send win "your message"
+python tools/coord.py inbox       # drain
+python tools/coord.py watch       # tail (used by /loop)
 ```
 
-**Pipeline:**
-1. **Universe**: Get index members via BDS
-2. **Data**: Fetch 5yr historical prices via BDH
-3. **Graph**: Build weighted correlation graph
-4. **Diffusion**: Laplacian diffusion on returns
-5. **Topology**: Persistent homology for regime features
-6. **Signals**: Market-neutral signal generation
-
-See [strategies/README.md](strategies/README.md) for full documentation.
+It's how `setup.ps1 -CoordSend mac` auto-publishes the new ngrok
+URL after every restart — kills the "did you remember to update
+the URL" friction.
 
 ---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE).
