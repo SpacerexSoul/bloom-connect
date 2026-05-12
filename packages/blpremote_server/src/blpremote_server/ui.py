@@ -196,6 +196,122 @@ def ngrok_authtoken_status(cfg_path: Path) -> tuple[str, str]:
     return ("unhappy", "Missing")
 
 
+# --- M10.5 first-run + reset helpers --------------------------------
+
+
+def count_users(users_json_path: Path) -> int:
+    """Return number of distinct users in users.json. Missing file
+    or unparseable content -> 0 (treated as 'no users')."""
+    if not users_json_path.exists():
+        return 0
+    try:
+        data = json.loads(users_json_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if isinstance(data, dict):
+        return len(data)
+    return 0
+
+
+def is_first_run(
+    secret_file: Path, users_json_path: Path, ngrok_cfg: Path
+) -> bool:
+    """Three signals tell us this looks like a fresh install: missing
+    secret file, no users in users.json, missing ngrok authtoken.
+    ANY of the three -> open Settings on first paint so the user can
+    fill them without going to PowerShell."""
+    if not secret_file.exists():
+        return True
+    if count_users(users_json_path) == 0:
+        return True
+    state, _ = ngrok_authtoken_status(ngrok_cfg)
+    if state != "happy":
+        return True
+    return False
+
+
+def create_user_inline(users_json_path: Path, username: str, password: str) -> bool:
+    """Direct import of the server's UserStore -- no PS shell-out, no
+    venv-python subprocess. Same bcrypt path the auth layer verifies
+    against. Returns True if user was created, False if name already
+    existed (UserStore.create_user contract)."""
+    from blpremote_server.auth import UserStore
+
+    return UserStore(str(users_json_path)).create_user(username, password)
+
+
+def set_ngrok_authtoken_inline(
+    ngrok_exe: Optional[Path], token: str
+) -> tuple[bool, str]:
+    """Run `ngrok config add-authtoken <token>` directly. Returns
+    (ok, message). ngrok_exe of None means we never installed it
+    (setup.ps1 chunk a does that from PS)."""
+    if ngrok_exe is None or not Path(ngrok_exe).exists():
+        return (False, "ngrok.exe not found in tools/ -- run [Start Server] once to install")
+    if not token.strip():
+        return (False, "empty authtoken")
+    try:
+        cp = subprocess.run(
+            [str(ngrok_exe), "config", "add-authtoken", token.strip()],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if cp.returncode != 0:
+            return (False, (cp.stderr or cp.stdout or f"exit {cp.returncode}").strip())
+    except Exception as exc:
+        return (False, f"{type(exc).__name__}: {exc}")
+    return (True, "authtoken saved")
+
+
+def reset_install_state(
+    secret_file: Path,
+    users_json_path: Path,
+    pairing_code_file: Path,
+    backup_root: Path,
+) -> Optional[Path]:
+    """Move (don't delete) state files into a timestamped backup
+    directory under backup_root. Lets a user undo a click of [Reset]
+    by hand. Returns the backup dir path, or None if nothing was
+    moved (backup_root never created in that case).
+
+    ngrok authtoken is intentionally preserved -- requiring the user
+    to re-paste it on every reset is annoying friction; rotating it
+    has its own [Set authtoken] path."""
+    import datetime as _dt
+
+    moved: list[Path] = []
+    targets = [secret_file, users_json_path, pairing_code_file]
+    if not any(p.exists() for p in targets):
+        return None
+
+    ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = backup_root / f"backup-{ts}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for p in targets:
+        if p.exists():
+            try:
+                dest = backup_dir / p.name
+                # Path.rename across volumes can fail on Windows; use
+                # a copy + delete fallback so cross-volume moves work.
+                try:
+                    p.rename(dest)
+                except OSError:
+                    import shutil as _shutil
+
+                    _shutil.copy2(p, dest)
+                    p.unlink(missing_ok=True)
+                moved.append(dest)
+            except OSError:
+                pass
+    if not moved:
+        try:
+            backup_dir.rmdir()
+        except OSError:
+            pass
+        return None
+    return backup_dir
+
+
 def start_button_state(bbg_state: str) -> str:
     """Pure: gate the [Start Server] button on the BBG probe result.
     Per M9 plan adef805 option (a): only enabled when BBG detected."""
@@ -284,9 +400,11 @@ class ServerUIController:
     REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
     NGROK_URL_FILE = REPO_ROOT / ".coord" / "last_ngrok_url.txt"
     PAIRING_CODE_FILE = REPO_ROOT / ".coord" / "last_pairing_code.txt"
+    USERS_JSON_FILE = REPO_ROOT / "users.json"
     COORD_SCRIPT = REPO_ROOT / "tools" / "coord.py"
     MAC_TARGET = "mac"
     SECRET_FILE = Path.home() / ".blpremote" / "server_secret.txt"
+    BACKUP_ROOT = Path.home() / ".blpremote"
     NGROK_CFG = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ngrok" / "ngrok.yml"
 
     def __init__(self) -> None:
@@ -388,6 +506,14 @@ class ServerUIController:
         self._active_proc: Optional[subprocess.Popen] = None
 
         self._append_log("UI started — status block polling every 2s.")
+
+        # M10.5: auto-open Settings on first launch when state is empty
+        # (no JWT secret on disk OR no users in users.json OR ngrok
+        # authtoken not configured). Mirrors the mac client UI's
+        # first-launch dialog detection.
+        if is_first_run(self.SECRET_FILE, self.USERS_JSON_FILE, self.NGROK_CFG):
+            self._append_log("first-run state detected — opening Settings")
+            self.root.after(300, self._on_open_settings)
 
     # --- Widget helpers --------------------------------------------
     def _make_status_row(self, parent: Any, label: str) -> dict[str, Any]:
@@ -508,15 +634,20 @@ class ServerUIController:
 
     def _on_open_settings(self) -> None:
         """Open the Settings modal. M10 item 5 mirror of mac's
-        client-side _open_settings_dialog. All actions are real, no
-        stub placeholders."""
+        client-side _open_settings_dialog. M10.5 adds first-user +
+        password fields (gated on empty users.json) and a [Reset]
+        button so the entire first-run + reset flow happens without
+        ever dropping to PowerShell."""
         _open_settings_dialog(
             parent=self.root,
             secret_file=self.SECRET_FILE,
             ngrok_cfg=self.NGROK_CFG,
             pairing_code_file=self.PAIRING_CODE_FILE,
+            users_json_path=self.USERS_JSON_FILE,
+            backup_root=self.BACKUP_ROOT,
             ngrok_exe=self._resolve_ngrok_exe(),
             log=self._append_log,
+            on_request_stop=self._on_stop,
         )
 
     def _resolve_ngrok_exe(self) -> Optional[Path]:
@@ -617,13 +748,26 @@ def _open_settings_dialog(  # pragma: no cover (Tkinter)
     secret_file: Path,
     ngrok_cfg: Path,
     pairing_code_file: Path,
+    users_json_path: Path,
+    backup_root: Path,
     ngrok_exe: Optional[Path],
     log: Any,
+    on_request_stop: Any,
 ) -> None:
-    """Modal Settings dialog. Mirrors mac client UI's
-    ``_open_settings_dialog`` shape but the fields are server-side
-    concerns: pairing code (display + copy + regen), JWT secret
-    (status + regen), ngrok authtoken (status + set)."""
+    """Modal Settings dialog. M9 item 5 + M10.5 first-run + reset.
+
+    First-run path (no users on disk): the dialog also exposes
+    First user / Password Entries so the user can create the initial
+    account from the UI without dropping to PowerShell. Save then
+    cascades the missing state into existence (JWT secret + user +
+    pairing code emit), all from this UI's process.
+
+    Steady-state path (users exist): same dialog without the user/
+    pass Entries; per-row [Regenerate] + [Set...] handle rotation.
+
+    [Reset] in the bottom-left wipes the install state to a backup
+    dir (timestamped under %USERPROFILE%/.blpremote/backup-<ts>)
+    so an accidental click is recoverable in one move."""
     import tkinter as tk
     from tkinter import ttk
 
@@ -631,7 +775,8 @@ def _open_settings_dialog(  # pragma: no cover (Tkinter)
     dlg.title("Settings")
     dlg.transient(parent)
     dlg.grab_set()
-    dlg.geometry("520x360")
+    show_first_run_fields = count_users(users_json_path) == 0
+    dlg.geometry("540x460" if show_first_run_fields else "520x380")
     dlg.resizable(False, False)
 
     main = ttk.Frame(dlg, padding=14)
@@ -758,15 +903,180 @@ def _open_settings_dialog(  # pragma: no cover (Tkinter)
         row=2, column=2, padx=(8, 0), sticky="e", pady=4
     )
 
+    # ── First user + Password (M10.5; gated on no users on disk) ─
+    user_var = tk.StringVar(value="")
+    pass_var = tk.StringVar(value="")
+    if show_first_run_fields:
+        ttk.Separator(main).grid(
+            row=3, column=0, columnspan=3, sticky="we", pady=(12, 6)
+        )
+        ttk.Label(
+            main, text="First user", width=18, anchor="w"
+        ).grid(row=4, column=0, sticky="w", pady=4)
+        ttk.Entry(main, textvariable=user_var, width=28).grid(
+            row=4, column=1, columnspan=2, sticky="we", pady=4
+        )
+        ttk.Label(
+            main, text="Password", width=18, anchor="w"
+        ).grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Entry(main, textvariable=pass_var, show="•", width=28).grid(
+            row=5, column=1, columnspan=2, sticky="we", pady=4
+        )
+        ttk.Label(
+            main,
+            text="(creates the first account in users.json + emits a pairing code)",
+            foreground="#666",
+        ).grid(row=6, column=0, columnspan=3, sticky="w")
+
+    # ── Save (M10.5: cascades missing state) ─────────────────────
+    def do_save():
+        msg_parts: list[str] = []
+        # JWT secret: auto-gen if missing.
+        if not secret_file.exists():
+            try:
+                new_secret = regenerate_jwt_secret(secret_file)
+                jwt_status_var.set("Configured (just generated)")
+                msg_parts.append(f"new JWT secret -> {secret_file.name}")
+                log(f"[settings] auto-generated JWT secret -> {secret_file}")
+            except Exception as e:
+                msg_var.set(f"jwt auto-gen failed: {type(e).__name__}: {e}")
+                return
+        # First user creation if both fields filled.
+        if show_first_run_fields:
+            u = user_var.get().strip()
+            p = pass_var.get()
+            if u and p:
+                try:
+                    ok = create_user_inline(users_json_path, u, p)
+                except Exception as e:
+                    msg_var.set(f"user creation failed: {type(e).__name__}: {e}")
+                    return
+                if not ok:
+                    msg_var.set(f"user '{u}' already exists -- skipped")
+                else:
+                    msg_parts.append(f"created user '{u}'")
+                    log(f"[settings] created first user '{u}' (bcrypt-hashed)")
+                    # Best-effort pairing-code emit if we know the URL.
+                    url_state, url = read_ngrok_url(
+                        pairing_code_file.parent / "last_ngrok_url.txt"
+                    )
+                    if url:
+                        try:
+                            payload = json.dumps(
+                                {"v": 1, "url": url, "user": u, "pass": p},
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                            import base64
+
+                            code = base64.b64encode(payload).decode("ascii")
+                            pairing_code_file.parent.mkdir(parents=True, exist_ok=True)
+                            pairing_code_file.write_text(code, encoding="utf-8")
+                            pair_var.set(code)
+                            pair_entry.configure(state="normal")
+                            pair_entry.configure(state="readonly")
+                            msg_parts.append("pairing code refreshed")
+                            log("[settings] emitted pairing code")
+                        except Exception as e:
+                            log(f"[settings] pairing emit failed: {e!r}")
+                    else:
+                        msg_parts.append(
+                            "ngrok URL not yet known; pairing code will appear after [Start Server]"
+                        )
+                # Wipe local references to the password.
+                pass_var.set("")
+            elif u or p:
+                msg_var.set("fill BOTH user and password to create an account")
+                return
+        if not msg_parts:
+            msg_var.set("nothing to save")
+            return
+        msg_var.set("saved: " + ", ".join(msg_parts))
+
+    # ── Reset (M10.5; bottom-left, destructive distance from Save) ─
+    def do_reset():
+        # Confirm modal: explicit list of what will happen.
+        confirm = tk.Toplevel(dlg)
+        confirm.title("Reset bloom-connect server config?")
+        confirm.transient(dlg)
+        confirm.grab_set()
+        confirm.geometry("480x280")
+        confirm.resizable(False, False)
+        body = ttk.Frame(confirm, padding=14)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body, text="Reset will:", font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w")
+        bullets = (
+            "  • stop the server if running\n"
+            "  • back up server_secret.txt + users.json + pairing-code\n"
+            "    to %USERPROFILE%/.blpremote/backup-<timestamp>/\n"
+            "  • remove them from active state (status LEDs go grey)\n"
+            "  • re-open Settings so you can re-enter credentials\n\n"
+            "ngrok authtoken is preserved (rotate via [Set...] separately)."
+        )
+        ttk.Label(body, text=bullets, justify="left").pack(anchor="w", pady=(4, 8))
+        result = {"go": False}
+
+        def cancel():
+            confirm.destroy()
+
+        def proceed():
+            result["go"] = True
+            confirm.destroy()
+
+        bb = ttk.Frame(body)
+        bb.pack(fill="x", side="bottom")
+        cancel_btn = ttk.Button(bb, text="Cancel", width=12, command=cancel)
+        cancel_btn.pack(side="right", padx=(6, 0))
+        cancel_btn.focus_set()  # default focus on the safe action
+        ttk.Button(
+            bb, text="Reset everything", width=18, command=proceed
+        ).pack(side="right")
+        confirm.wait_window()
+
+        if not result["go"]:
+            return
+        # Stop the server first via the controller's existing path.
+        try:
+            on_request_stop()
+        except Exception as e:
+            log(f"[settings] stop during reset failed: {e!r}")
+        backup = reset_install_state(
+            secret_file, users_json_path, pairing_code_file, backup_root
+        )
+        if backup is None:
+            msg_var.set("reset: nothing to back up (already empty)")
+            log("[settings] reset -- nothing to back up")
+        else:
+            msg_var.set(f"reset complete -- backup at {backup}")
+            log(f"[settings] reset -> backup dir {backup}")
+        # Clear the pairing-code Entry visually.
+        pair_var.set("")
+        # Refresh the JWT status row (was the only thing we showed
+        # that actually depends on the now-deleted secret file).
+        new_state, new_text = probe_jwt()
+        jwt_status_var.set(new_text)
+        # Close + re-open the dialog so the first-run fields appear.
+        dlg.destroy()
+        # Caller will see the dialog close; first-run detection on
+        # next manual open / next startup will re-trigger the prompt.
+
     # ── Status message ──────────────────────────────────────────
-    ttk.Label(main, textvariable=msg_var, foreground="#666", wraplength=480).grid(
-        row=3, column=0, columnspan=3, sticky="w", pady=(14, 0)
+    msg_row = 7 if show_first_run_fields else 3
+    ttk.Label(main, textvariable=msg_var, foreground="#666", wraplength=500).grid(
+        row=msg_row, column=0, columnspan=3, sticky="we", pady=(14, 0)
     )
 
-    # ── Close ───────────────────────────────────────────────────
+    # ── Bottom button row ───────────────────────────────────────
     btns = ttk.Frame(main)
-    btns.grid(row=4, column=0, columnspan=3, sticky="e", pady=(18, 0))
+    btn_row = msg_row + 1
+    btns.grid(row=btn_row, column=0, columnspan=3, sticky="we", pady=(18, 0))
+    # Reset on the left -- destructive-button-distance pattern.
+    ttk.Button(btns, text="Reset...", width=10, command=do_reset).pack(side="left")
     ttk.Button(btns, text="Close", width=10, command=dlg.destroy).pack(side="right")
+    ttk.Button(btns, text="Save", width=10, command=do_save).pack(
+        side="right", padx=(0, 6)
+    )
 
     main.columnconfigure(1, weight=1)
     dlg.wait_window()
