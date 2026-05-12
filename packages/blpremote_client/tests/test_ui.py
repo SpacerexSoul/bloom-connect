@@ -108,6 +108,67 @@ class TestIdentityProbe:
         assert ctrl.get_identity() == {"username": "", "url": ""}
 
 
+class TestSaveSettings:
+    """The Settings dialog's persistence layer. Each kwarg is optional;
+    None preserves the existing value so a user editing one field
+    doesn't have to re-type the others. Empty string clears."""
+
+    def test_writes_full_identity(self, tmp_path):
+        idf = tmp_path / "identity.json"
+        ctrl = ClientController(identity_path=idf)
+        ctrl.openrouter_path = tmp_path / "openrouter.json"
+        ctrl.save_settings(url="https://x/", username="mac", password="secret")
+        saved = json.loads(idf.read_text())
+        assert saved == {"url": "https://x", "user": "mac", "password": "secret"}
+
+    def test_preserves_unspecified_fields(self, tmp_path):
+        idf = tmp_path / "identity.json"
+        idf.write_text(json.dumps({"url": "https://old/", "user": "mac", "password": "p"}))
+        ctrl = ClientController(identity_path=idf)
+        ctrl.openrouter_path = tmp_path / "openrouter.json"
+        # Edit only the URL — username + password must survive untouched.
+        ctrl.save_settings(url="https://new/")
+        saved = json.loads(idf.read_text())
+        assert saved["url"] == "https://new"
+        assert saved["user"] == "mac"
+        assert saved["password"] == "p"
+
+    def test_strips_trailing_slash_on_url(self, tmp_path):
+        idf = tmp_path / "identity.json"
+        ctrl = ClientController(identity_path=idf)
+        ctrl.openrouter_path = tmp_path / "openrouter.json"
+        ctrl.save_settings(url="https://x/")
+        assert json.loads(idf.read_text())["url"] == "https://x"
+
+    def test_openrouter_key_writes_to_separate_file(self, tmp_path):
+        kf = tmp_path / "openrouter.json"
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        ctrl.openrouter_path = kf
+        ctrl.save_settings(openrouter_key="sk-or-real")
+        assert json.loads(kf.read_text()) == {"api_key": "sk-or-real"}
+
+    def test_chmods_files_600(self, tmp_path):
+        import stat
+        idf = tmp_path / "identity.json"
+        kf = tmp_path / "openrouter.json"
+        ctrl = ClientController(identity_path=idf)
+        ctrl.openrouter_path = kf
+        ctrl.save_settings(url="https://x/", openrouter_key="sk-or-real")
+        # 0o600 == owner read+write only — defense against accidental
+        # secret leakage via wide perms.
+        assert stat.S_IMODE(idf.stat().st_mode) == 0o600
+        assert stat.S_IMODE(kf.stat().st_mode) == 0o600
+
+    def test_no_kwargs_is_noop(self, tmp_path):
+        # User opens Settings, clicks Save without changing anything →
+        # nothing written, no file touched.
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        ctrl.openrouter_path = tmp_path / "openrouter.json"
+        ctrl.save_settings()  # all defaults None
+        assert not ctrl.identity_path.exists()
+        assert not ctrl.openrouter_path.exists()
+
+
 class TestConnect:
     def test_happy_path_persists_url_back(self, tmp_path):
         idf = tmp_path / "identity.json"

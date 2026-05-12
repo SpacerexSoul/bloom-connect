@@ -112,6 +112,52 @@ class ClientController:
             pass
         return out
 
+    def save_settings(
+        self,
+        *,
+        url: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        openrouter_key: Optional[str] = None,
+    ) -> None:
+        """Persist edits from the Settings dialog. Fields passed as
+        ``None`` are preserved (so the user can edit one without
+        re-typing all the others); fields passed as ``""`` are
+        cleared. Files chmod-600 on write."""
+        # identity.json — merge with existing
+        if url is not None or username is not None or password is not None:
+            self.identity_path.parent.mkdir(parents=True, exist_ok=True)
+            data: dict[str, Any] = {}
+            if self.identity_path.exists():
+                try:
+                    raw = json.loads(self.identity_path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        data = raw
+                except (OSError, json.JSONDecodeError):
+                    data = {}
+            if url is not None:
+                data["url"] = url.rstrip("/")
+            if username is not None:
+                data["user"] = username
+            if password is not None:
+                data["password"] = password
+            self.identity_path.write_text(json.dumps(data, indent=2))
+            try:
+                self.identity_path.chmod(0o600)
+            except OSError:
+                pass
+
+        # openrouter.json — independent write
+        if openrouter_key is not None:
+            self.openrouter_path.parent.mkdir(parents=True, exist_ok=True)
+            self.openrouter_path.write_text(
+                json.dumps({"api_key": openrouter_key}, indent=2)
+            )
+            try:
+                self.openrouter_path.chmod(0o600)
+            except OSError:
+                pass
+
     # ── Long-running actions (call from a worker thread) ─────────
 
     def connect(self, url: str) -> ConnectResult:
@@ -215,6 +261,92 @@ def _format_execute(result: ExecuteResult) -> str:
     return "\n".join(parts)
 
 
+def _open_settings_dialog(parent, controller: ClientController, on_saved):  # pragma: no cover (Tkinter)
+    """Modal Settings dialog. Edits ~/.blpremote/identity.json +
+    openrouter.json so users don't have to touch the JSON files by
+    hand. Password and key fields are masked; leaving them blank
+    preserves the existing value (so users can edit URL or username
+    without re-typing secrets)."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    dlg = tk.Toplevel(parent)
+    dlg.title("Settings")
+    dlg.transient(parent)
+    dlg.grab_set()
+    dlg.geometry("440x290")
+    dlg.resizable(False, False)
+
+    cur = controller.get_identity()
+    has_key = controller.has_openrouter_key()
+
+    main = ttk.Frame(dlg, padding=14)
+    main.pack(fill="both", expand=True)
+
+    ttk.Label(main, text="Server URL", width=14, anchor="w").grid(row=0, column=0, sticky="w", pady=4)
+    url_var = tk.StringVar(value=cur["url"])
+    ttk.Entry(main, textvariable=url_var, width=34).grid(row=0, column=1, sticky="we", pady=4)
+
+    ttk.Label(main, text="Username", width=14, anchor="w").grid(row=1, column=0, sticky="w", pady=4)
+    user_var = tk.StringVar(value=cur["username"])
+    ttk.Entry(main, textvariable=user_var, width=34).grid(row=1, column=1, sticky="we", pady=4)
+
+    ttk.Label(main, text="Password", width=14, anchor="w").grid(row=2, column=0, sticky="w", pady=4)
+    pass_var = tk.StringVar(value="")
+    pass_entry = ttk.Entry(main, textvariable=pass_var, show="•", width=34)
+    pass_entry.grid(row=2, column=1, sticky="we", pady=4)
+    ttk.Label(main, text="(blank = keep current)", foreground="#666").grid(
+        row=3, column=1, sticky="w"
+    )
+
+    ttk.Label(main, text="OpenRouter key", width=14, anchor="w").grid(row=4, column=0, sticky="w", pady=(10, 4))
+    key_var = tk.StringVar(value="")
+    ttk.Entry(main, textvariable=key_var, show="•", width=34).grid(row=4, column=1, sticky="we", pady=(10, 4))
+    status_msg = "set — blank = keep current" if has_key else "not set — paste sk-or-... to enable LLM"
+    ttk.Label(main, text=f"({status_msg})", foreground="#666").grid(
+        row=5, column=1, sticky="w"
+    )
+
+    msg_var = tk.StringVar(value="")
+    ttk.Label(main, textvariable=msg_var, foreground="#cf222e").grid(
+        row=6, column=0, columnspan=2, sticky="w", pady=(10, 0)
+    )
+
+    def do_save():
+        kwargs: dict = {}
+        new_url = url_var.get().strip()
+        new_user = user_var.get().strip()
+        new_pass = pass_var.get()
+        new_key = key_var.get().strip()
+        # Only pass through fields the user actually changed.
+        if new_url != cur["url"]:
+            kwargs["url"] = new_url
+        if new_user != cur["username"]:
+            kwargs["username"] = new_user
+        if new_pass:
+            kwargs["password"] = new_pass
+        if new_key:
+            kwargs["openrouter_key"] = new_key
+        if not kwargs:
+            dlg.destroy()
+            return
+        try:
+            controller.save_settings(**kwargs)
+        except Exception as e:
+            msg_var.set(f"save failed: {type(e).__name__}: {e}")
+            return
+        on_saved()
+        dlg.destroy()
+
+    btns = ttk.Frame(main)
+    btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
+    ttk.Button(btns, text="Cancel", width=10, command=dlg.destroy).pack(side="right", padx=(6, 0))
+    ttk.Button(btns, text="Save", width=10, command=do_save).pack(side="right")
+
+    main.columnconfigure(1, weight=1)
+    dlg.wait_window()
+
+
 def build_window(controller: ClientController):  # pragma: no cover (Tkinter)
     """Construct the Tk root + all widgets, wire them to the
     controller through a queue+after pattern, return the root.
@@ -224,8 +356,8 @@ def build_window(controller: ClientController):  # pragma: no cover (Tkinter)
 
     root = tk.Tk()
     root.title("Bloomberg Remote — Client")
-    root.geometry("480x540+560+80")
-    root.minsize(460, 500)
+    root.geometry("480x580+560+80")
+    root.minsize(460, 540)
 
     style = ttk.Style()
     if "clam" in style.theme_names():
@@ -239,9 +371,13 @@ def build_window(controller: ClientController):  # pragma: no cover (Tkinter)
         c.pack(side="left", padx=(0, 6))
         return c, oid
 
+    # ── Top toolbar ──────────────────────────────────────────────
+    toolbar = ttk.Frame(root)
+    toolbar.pack(fill="x", padx=14, pady=(8, 0))
+
     # ── Connection ───────────────────────────────────────────────
     conn = ttk.LabelFrame(root, text="Connection")
-    conn.pack(fill="x", padx=14, pady=(10, 0))
+    conn.pack(fill="x", padx=14, pady=(8, 0))
 
     ident = controller.get_identity()
 
@@ -253,14 +389,47 @@ def build_window(controller: ClientController):  # pragma: no cover (Tkinter)
 
     row2 = ttk.Frame(conn); row2.pack(fill="x", pady=2)
     ttk.Label(row2, text="Identity", width=14, anchor="w").pack(side="left")
-    ttk.Label(row2, text=ident["username"] or "(none — write ~/.blpremote/identity.json)",
-              anchor="w").pack(side="left")
+    identity_label = ttk.Label(
+        row2,
+        text=ident["username"] or "(none — open Settings to configure)",
+        anchor="w",
+    )
+    identity_label.pack(side="left")
 
     row3 = ttk.Frame(conn); row3.pack(fill="x", pady=2)
     ttk.Label(row3, text="OpenRouter key", width=14, anchor="w").pack(side="left")
     has_key = controller.has_openrouter_key()
-    _led(row3, LED_COLOUR["happy" if has_key else "unhappy"])
-    ttk.Label(row3, text="Configured" if has_key else "Missing", anchor="w").pack(side="left")
+    openrouter_canvas, openrouter_oval = _led(row3, LED_COLOUR["happy" if has_key else "unhappy"])
+    openrouter_label = ttk.Label(row3, text="Configured" if has_key else "Missing", anchor="w")
+    openrouter_label.pack(side="left")
+
+    def refresh_identity_display() -> None:
+        """Re-read identity.json + openrouter.json after a Settings
+        save and update the readout widgets."""
+        new = controller.get_identity()
+        url_var.set(new["url"])
+        identity_label.configure(
+            text=new["username"] or "(none — open Settings to configure)"
+        )
+        new_has_key = controller.has_openrouter_key()
+        openrouter_canvas.itemconfig(
+            openrouter_oval,
+            fill=LED_COLOUR["happy" if new_has_key else "unhappy"],
+        )
+        openrouter_label.configure(text="Configured" if new_has_key else "Missing")
+        # Settings change while connected → Ask might newly become
+        # possible (if key was just added) or no longer (if key was
+        # just cleared). Re-evaluate.
+        if controller.is_connected():
+            ask_btn.configure(state="normal" if new_has_key else "disabled")
+
+    # Toolbar button — needs refresh_identity_display in scope.
+    ttk.Button(
+        toolbar,
+        text="⚙ Settings",
+        width=12,
+        command=lambda: _open_settings_dialog(root, controller, refresh_identity_display),
+    ).pack(side="right")
 
     row4 = ttk.Frame(conn); row4.pack(fill="x", pady=(8, 4))
     ttk.Label(row4, text="Status", width=14, anchor="w").pack(side="left")
