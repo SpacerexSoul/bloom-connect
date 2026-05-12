@@ -60,11 +60,31 @@ from pydantic import BaseModel, Field
 
 from blpremote_client.host import RemoteHost
 from blpremote_client.models import (
+    AppendOp,
     AuthToken,
     ExecutionPlan,
     Op,
     PlanLimits,
+    SetOp,
 )
+
+
+# BBG element names that are arrays — `set` on these produces a runtime
+# "Attempt to set out of range index '0' on array element" error from
+# the Bloomberg API. Cheap models occasionally emit `set` for these
+# despite the safety prompt; the post-parse normaliser below flips them
+# to `append` deterministically so the request actually executes.
+#
+# Sourced from the M2 IR contract — the request types in scope across
+# refdata / historical / intraday / fieldinfo all share these names.
+# If BBG adds another array element, add it here. Scalars stay as `set`.
+_KNOWN_ARRAY_PATHS = frozenset({
+    "securities",
+    "fields",
+    "eventTypes",
+    "overrides",
+    "ids",
+})
 
 
 # Default schema target. The LLM only sees one service's schema per
@@ -181,6 +201,22 @@ def _service_schema_block(service: str, schema: dict[str, Any]) -> str:
         f"## Schema for {service}\n\n"
         f"{json.dumps(schema, indent=2, sort_keys=True)}"
     )
+
+
+def _normalise_array_paths(ops: list[Op]) -> list[Op]:
+    """Flip `set` → `append` for ops whose path is a known BBG array
+    element. Deterministic post-LLM fixer — closes the intermittent
+    'cheap model emitted set when it meant append' failure mode.
+    Other ops (correct `append`, `set` on scalar paths, lifecycle
+    ops) pass through unchanged.
+    """
+    out: list[Op] = []
+    for op in ops:
+        if isinstance(op, SetOp) and op.path in _KNOWN_ARRAY_PATHS:
+            out.append(AppendOp(id=op.id, path=op.path, value=op.value))
+        else:
+            out.append(op)
+    return out
 
 
 def _build_system(service: str, schema: dict[str, Any]) -> str:
@@ -301,11 +337,17 @@ def ask(
     )
     parsed: LLMPlanResponse = response.choices[0].message.parsed
 
+    # Fix the one well-known LLM drift: cheap models emit `set` for
+    # array elements (securities, fields, …) ~30% of the time despite
+    # the prompt's instruction. Deterministic post-parse flip so the
+    # plan actually executes.
+    normalised_ops = _normalise_array_paths(parsed.plan.ops)
+
     # Attach auth post-parse — the model never saw it, never could.
     full_plan = ExecutionPlan(
         protocol_version=parsed.plan.protocol_version,
         auth=AuthToken(token=host._get_token()),
-        ops=parsed.plan.ops,
+        ops=normalised_ops,
         limits=parsed.plan.limits,
     )
     return {"plan": full_plan, "explain": parsed.explain}

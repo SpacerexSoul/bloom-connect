@@ -39,9 +39,17 @@ or `client_ui_preview.py`.
 ![server UI mockup](screenshots/m9-server-ui-mockup.png)
 
 **macOS client UI** — `tools/blpremote-client-ui.py` (mac, real
-implementation, captured 2026-05-12):
+implementation, captured 2026-05-12 mid-run against the live
+Bloomberg server; shows `PX_LAST: 294` for AAPL fetched
+end-to-end through the GUI):
 
 ![client UI](screenshots/m9-client-ui.png)
+
+Live-verified end-to-end 2026-05-12: Connect → Ask "AAPL last
+price" → Run → real BBG `PX_LAST` returns in ~277ms server-side.
+Click-through happy path captured in
+`docs/screenshots/m9-live-{01..05}-*.png` (initial → connected →
+asking → plan-ready → result).
 
 ## Tiers (preferred → fallback)
 

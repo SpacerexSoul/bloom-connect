@@ -24,12 +24,14 @@ from blpremote_client.llm import (
     _service_schema_block,
     ask,
 )
+from blpremote_client.llm import _normalise_array_paths
 from blpremote_client.models import (
     AppendOp,
     CollectResponseOp,
     CreateRequestOp,
     OpenServiceOp,
     SendRequestOp,
+    SetOp,
     StartSessionOp,
 )
 
@@ -279,6 +281,101 @@ class TestApiKeyResolution:
         assert "OPENROUTER_API_KEY" in msg
         assert "openrouter.json" in msg
         assert "api_key=" in msg
+
+
+class TestNormaliseArrayPaths:
+    """The fixer that catches cheap-model drift on array elements.
+
+    DeepSeek-chat emits `set id=r1 path=securities value=...` ~30% of
+    the time despite the safety prompt's `append for arrays` rule.
+    BBG rejects it with "out of range index '0'" at runtime. The fixer
+    deterministically flips these to `append` post-parse so the plan
+    actually executes.
+    """
+
+    def test_flips_set_securities_to_append(self):
+        ops = [SetOp(id="r1", path="securities", value="AAPL US Equity")]
+        out = _normalise_array_paths(ops)
+        assert len(out) == 1
+        assert isinstance(out[0], AppendOp)
+        assert out[0].id == "r1"
+        assert out[0].path == "securities"
+        assert out[0].value == "AAPL US Equity"
+
+    def test_flips_set_fields_to_append(self):
+        ops = [SetOp(id="r1", path="fields", value="PX_LAST")]
+        out = _normalise_array_paths(ops)
+        assert isinstance(out[0], AppendOp)
+        assert out[0].path == "fields"
+
+    def test_flips_set_eventtypes_to_append(self):
+        # Intraday endpoints use `eventTypes`, also an array.
+        ops = [SetOp(id="r1", path="eventTypes", value="TRADE")]
+        out = _normalise_array_paths(ops)
+        assert isinstance(out[0], AppendOp)
+
+    def test_leaves_set_on_scalar_paths_alone(self):
+        # `set` on startDateTime / interval / eventType (singular) is
+        # correct and must pass through unchanged.
+        ops = [
+            SetOp(id="r1", path="startDateTime", value="2026-05-08T14:00:00+00:00"),
+            SetOp(id="r1", path="interval", value=1),
+            SetOp(id="r1", path="security", value="AAPL US Equity"),
+        ]
+        out = _normalise_array_paths(ops)
+        for op in out:
+            assert isinstance(op, SetOp)
+
+    def test_existing_append_passes_through(self):
+        # Correctly-emitted `append` ops are no-ops for the fixer.
+        ops = [AppendOp(id="r1", path="securities", value="AAPL US Equity")]
+        out = _normalise_array_paths(ops)
+        assert isinstance(out[0], AppendOp)
+        assert out[0].value == "AAPL US Equity"
+
+    def test_lifecycle_ops_untouched(self):
+        # start_session / open_service / create_request / send_request /
+        # collect_response are not Set/Append and must pass through.
+        ops = [
+            StartSessionOp(),
+            OpenServiceOp(service="//blp/refdata"),
+            CreateRequestOp(service="//blp/refdata", request="ReferenceDataRequest", id="r1"),
+            SendRequestOp(id="r1", correlation_id="c1"),
+            CollectResponseOp(correlation_id="c1", timeout_ms=10000),
+        ]
+        out = _normalise_array_paths(ops)
+        assert len(out) == len(ops)
+        for a, b in zip(ops, out):
+            assert type(a) is type(b)
+
+    def test_mixed_plan_only_arrays_flipped(self):
+        # A realistic refdata plan with one bad `set` on securities,
+        # one bad `set` on fields, one correct `append`, plus the full
+        # lifecycle prelude/postlude. After the fixer: all array ops
+        # are AppendOp, lifecycle ops untouched.
+        ops = [
+            StartSessionOp(),
+            OpenServiceOp(service="//blp/refdata"),
+            CreateRequestOp(service="//blp/refdata", request="ReferenceDataRequest", id="r1"),
+            SetOp(id="r1", path="securities", value="AAPL US Equity"),
+            SetOp(id="r1", path="fields", value="PX_LAST"),
+            AppendOp(id="r1", path="fields", value="VOLUME"),
+            SendRequestOp(id="r1", correlation_id="c1"),
+            CollectResponseOp(correlation_id="c1", timeout_ms=10000),
+        ]
+        out = _normalise_array_paths(ops)
+        assert len(out) == len(ops)
+        # ops 3 and 4 (index 3, 4) flipped to AppendOp
+        assert isinstance(out[3], AppendOp) and out[3].path == "securities"
+        assert isinstance(out[4], AppendOp) and out[4].path == "fields"
+        # op 5 was already AppendOp, still AppendOp
+        assert isinstance(out[5], AppendOp) and out[5].value == "VOLUME"
+        # lifecycle ops preserved
+        assert isinstance(out[0], StartSessionOp)
+        assert isinstance(out[-1], CollectResponseOp)
+
+    def test_empty_plan_returns_empty(self):
+        assert _normalise_array_paths([]) == []
 
 
 class TestImportError:
