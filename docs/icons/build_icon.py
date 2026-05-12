@@ -62,17 +62,26 @@ CANDLES = [
     (0.82, 0.78, 0.74, 0.85),
 ]
 
+# Deterministic ticker chips — small translucent "+0.1%" labels
+# scattered around the icon. ~20% opacity green-up / red-down so they
+# sit behind the letters as ambient scrolling-quote noise.
+# Skipped at sizes ≤64 (text would just be unreadable blobs).
+TICKERS = [
+    # x_pct, y_pct, "+/-", value
+    (0.05, 0.10, "+", 0.12),
+    (0.70, 0.08, "-", 0.45),
+    (0.85, 0.20, "+", 1.20),
+    (0.10, 0.70, "-", 0.03),
+    (0.80, 0.78, "+", 0.85),
+    (0.20, 0.88, "-", 1.40),
+    (0.60, 0.92, "+", 0.07),
+    (0.45, 0.06, "+", 2.30),
+]
+
 # Deterministic ticker chips — small "+0.1%" / "-2.5%" labels
 # scattered around the icon at ~12% opacity. (x_pct, y_pct, sign, value).
 # Avoids the dead-center band where Bc lives. Picked to read as
 # scrolling-quotes ambience without competing with the letterforms.
-TICKERS = [
-    # x_pct, y_pct, "+/-", value — 4 chips, one per quadrant.
-    (0.05, 0.10, "+", 0.12),  # top-left
-    (0.78, 0.10, "-", 0.45),  # top-right
-    (0.08, 0.85, "-", 1.40),  # bottom-left
-    (0.75, 0.85, "+", 0.85),  # bottom-right
-]
 
 # Helvetica Neue Bold ships with macOS; index 1 is typically Bold
 # in the .ttc. Falls back to Arial Black if absent.
@@ -95,15 +104,15 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
 
 
 def _draw_tickers(d: ImageDraw.ImageDraw, size: int) -> None:
-    """Tiny translucent "+0.1%" / "-2.5%" chips scattered around the
+    """Tiny translucent percentage chips scattered around the icon
     edges. Reads as ambient scrolling-quote noise; very low opacity
-    so they sit far behind the letterforms. Skip at ≤64 since the
-    text would just be unreadable blobs."""
+    so they sit far behind the letterforms. Skip at ≤64 px since
+    the text would just be unreadable blobs."""
     if size <= 64:
         return
     pt = max(8, int(size * 0.04))
     font = _load_font(pt)
-    alpha = 50  # ~20% opacity, soft
+    alpha = 50  # ~20% opacity
     for x_pct, y_pct, sign, val in TICKERS:
         colour = GREEN[:3] + (alpha,) if sign == "+" else RED[:3] + (alpha,)
         text = f"{sign}{val:.2f}%"
