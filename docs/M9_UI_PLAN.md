@@ -188,6 +188,41 @@ Rewrite scope:
   been pruned).
 - Two screenshots: server UI and client UI.
 
+## State machine — LED palette + button gating (locked 2026-05-12)
+
+Mockup uses one happy colour everywhere; real wiring needs a small
+state→colour table. Locked palette (GitHub Primer-aligned, matches
+the restrained aesthetic):
+
+| State                                                | Hex      | Examples                                                          |
+|------------------------------------------------------|----------|-------------------------------------------------------------------|
+| Happy                                                | `#2ea043` | Detected · Up · Configured · Connected                            |
+| Transient                                            | `#d29922` | Starting · Connecting · Reconnecting                              |
+| Unhappy                                              | `#cf222e` | Not running · Down · Default-secret · Disconnected · Error        |
+| Unknown / probing (pre-first-poll)                   | `#8b8d91` | Initial render before first /health or tasklist completes         |
+
+Encoded as a `_LED_COLOUR = {state: hex}` dict in the controller on
+each side. Same palette mac + win.
+
+**[Start Server] gating when Bloomberg Terminal not detected.**
+Server M1 lifespan tolerates BBG-down (logs warning, /health
+reports degraded). But: clicking Start → green ngrok + red BBG-not-
+running row → confusing user experience. Decision (locked, win's
+call to default, mac doesn't push back):
+
+- Default: **disable [Start Server]** when BBG not detected; tooltip
+  "Open Bloomberg Terminal first".
+- Edge case acknowledged: if `tasklist`/psutil detection is flaky
+  the user could get locked out of starting a fine server. If it
+  shows up in practice, fall back to option (b) — allow Start with
+  a confirm modal "Bloomberg Terminal not detected — server will
+  run in degraded mode. Continue?". Re-decide then; no need to
+  pre-build both paths.
+
+**Server port label.** "Up · :8000" in the mockup hardcodes 8000;
+real wiring pulls from `settings.port` (or the bound port from
+uvicorn). One-line fix in chunk (b).
+
 ## Win-side refinements (from coord 2026-05-12)
 
 Win read the plan and signed off on the win-side scope, with four
