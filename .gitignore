@@ -67,3 +67,5 @@ Thumbs.db
 build_artifacts/
 .venv-build/
 *.spec
+.venv-build/
+build_artifacts/
