@@ -1,0 +1,232 @@
+"""Tests for the M9 client UI controller.
+
+Only the :class:`ClientController` is tested — the Tkinter
+``build_window`` is glue code that needs an actual display server,
+so we leave it to the integration / smoke tier (double-click,
+manual verify). The controller is Tkinter-free by design exactly
+so this is easy.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from blpremote_client.ui import (
+    ClientController,
+    LED_COLOUR,
+    _format_execute,
+    _format_plan,
+)
+from blpremote_client.llm import LLMPlanResponse, _PlanWithoutAuth
+from blpremote_client.models import (
+    AppendOp,
+    AuthToken,
+    CollectResponseOp,
+    CreateRequestOp,
+    ExecutionPlan,
+    ExecutionResult,
+    OpenServiceOp,
+    SendRequestOp,
+    StartSessionOp,
+)
+
+
+def _sample_plan() -> ExecutionPlan:
+    return ExecutionPlan(
+        protocol_version="1.1",
+        auth=AuthToken(token="t"),
+        ops=[
+            StartSessionOp(),
+            OpenServiceOp(service="//blp/refdata"),
+            CreateRequestOp(service="//blp/refdata", request="ReferenceDataRequest", id="r1"),
+            AppendOp(id="r1", path="securities", value="AAPL US Equity"),
+            AppendOp(id="r1", path="fields", value="PX_LAST"),
+            SendRequestOp(id="r1", correlation_id="cid-1"),
+            CollectResponseOp(correlation_id="cid-1", timeout_ms=10000),
+        ],
+    )
+
+
+class TestLedPalette:
+    def test_four_states_all_hex(self):
+        # The state machine doc (M9_UI_PLAN.md) locks four states.
+        # If the palette keys drift, the UI wiring will quietly fall
+        # back to whatever colour was last set — fail loudly instead.
+        assert set(LED_COLOUR.keys()) == {"happy", "transient", "unhappy", "unknown"}
+        for state, colour in LED_COLOUR.items():
+            assert colour.startswith("#") and len(colour) == 7, f"{state}={colour}"
+
+
+class TestOpenRouterKeyProbe:
+    def test_env_var_wins(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        ctrl.openrouter_path = tmp_path / "missing.json"
+        assert ctrl.has_openrouter_key() is True
+
+    def test_file_present_no_env(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        kf = tmp_path / "openrouter.json"
+        kf.write_text(json.dumps({"api_key": "sk-or-real"}))
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        ctrl.openrouter_path = kf
+        assert ctrl.has_openrouter_key() is True
+
+    def test_neither_present(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        ctrl.openrouter_path = tmp_path / "nope.json"
+        assert ctrl.has_openrouter_key() is False
+
+    def test_corrupt_file_returns_false(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        kf = tmp_path / "openrouter.json"
+        kf.write_text("not valid json {{")
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        ctrl.openrouter_path = kf
+        assert ctrl.has_openrouter_key() is False
+
+
+class TestIdentityProbe:
+    def test_reads_username_and_url(self, tmp_path):
+        idf = tmp_path / "identity.json"
+        idf.write_text(json.dumps({"user": "mac", "url": "https://x/", "password": "secret"}))
+        ctrl = ClientController(identity_path=idf)
+        out = ctrl.get_identity()
+        assert out["username"] == "mac"
+        assert out["url"] == "https://x/"
+        # password must NOT leak into the readout dict — it would
+        # show up on the UI; defence in depth.
+        assert "password" not in out
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        ctrl = ClientController(identity_path=tmp_path / "absent.json")
+        assert ctrl.get_identity() == {"username": "", "url": ""}
+
+
+class TestConnect:
+    def test_happy_path_persists_url_back(self, tmp_path):
+        idf = tmp_path / "identity.json"
+        idf.write_text(json.dumps({"user": "mac", "password": "p"}))  # url missing
+        ctrl = ClientController(identity_path=idf)
+
+        fake_host = MagicMock()
+        fake_host.health.return_value = {"status": "ok"}
+        fake_host.version.return_value = "1.2.3"
+
+        with patch("blpremote_client.host.RemoteHost", return_value=fake_host):
+            r = ctrl.connect("https://new.example/")
+
+        assert r.ok is True
+        assert r.server_version == "1.2.3"
+        assert ctrl.is_connected()
+        # URL persisted (rstripped) to identity.json for next launch.
+        saved = json.loads(idf.read_text())
+        assert saved["url"] == "https://new.example"
+        # other fields preserved
+        assert saved["user"] == "mac"
+        assert saved["password"] == "p"
+
+    def test_health_failure_returns_error(self, tmp_path):
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+
+        fake_host = MagicMock()
+        fake_host.health.side_effect = ConnectionError("nope")
+
+        with patch("blpremote_client.host.RemoteHost", return_value=fake_host):
+            r = ctrl.connect("https://broken/")
+
+        assert r.ok is False
+        assert "ConnectionError" in r.message
+        assert not ctrl.is_connected()
+
+
+class TestDisconnect:
+    def test_drops_host_reference(self, tmp_path):
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        ctrl._host = MagicMock()  # pretend connected
+        assert ctrl.is_connected()
+        ctrl.disconnect()
+        assert not ctrl.is_connected()
+
+
+class TestAsk:
+    def test_returns_error_when_not_connected(self, tmp_path):
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        r = ctrl.ask("AAPL last price")
+        assert r.ok is False
+        assert "not connected" in r.message
+
+    def test_passes_through_to_llm_ask(self, tmp_path):
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        ctrl._host = MagicMock()
+        plan = _sample_plan()
+        with patch("blpremote_client.llm.ask",
+                   return_value={"plan": plan, "explain": "ref data for AAPL"}):
+            r = ctrl.ask("AAPL last price")
+        assert r.ok is True
+        assert r.explain == "ref data for AAPL"
+        assert r.plan is plan
+
+
+class TestExecute:
+    def test_returns_error_when_not_connected(self, tmp_path):
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        r = ctrl.execute(_sample_plan())
+        assert r.ok is False
+        assert "not connected" in r.message
+
+    def test_ok_status_returns_data(self, tmp_path):
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        fake_host = MagicMock()
+        fake_host.execute.return_value = ExecutionResult(
+            request_id="rq-1", status="ok",
+            data={"AAPL US Equity": {"PX_LAST": 285.5}},
+            server_timing_ms=42,
+        )
+        ctrl._host = fake_host
+        r = ctrl.execute(_sample_plan())
+        assert r.ok is True
+        assert r.data == {"AAPL US Equity": {"PX_LAST": 285.5}}
+        assert r.server_timing_ms == 42
+
+    def test_error_status_marked_not_ok(self, tmp_path):
+        ctrl = ClientController(identity_path=tmp_path / "identity.json")
+        fake_host = MagicMock()
+        fake_host.execute.return_value = ExecutionResult(
+            request_id="rq-1", status="error",
+            data={},
+        )
+        ctrl._host = fake_host
+        r = ctrl.execute(_sample_plan())
+        assert r.ok is False
+
+
+class TestFormatters:
+    def test_plan_formatter_includes_each_op(self):
+        text = _format_plan(_sample_plan(), "ref data for AAPL")
+        assert "explain: ref data for AAPL" in text
+        assert "ops (7):" in text
+        assert "start_session" in text
+        assert "open_service" in text
+        assert "ReferenceDataRequest" in text
+        assert "AAPL US Equity" in text
+        assert "PX_LAST" in text
+        assert "collect_response" in text
+
+    def test_execute_formatter_includes_status_and_data(self):
+        from blpremote_client.ui import ExecuteResult
+        r = ExecuteResult(
+            ok=True, message="status: ok",
+            data={"AAPL US Equity": {"PX_LAST": 285.5}},
+            warnings=[], server_timing_ms=42,
+        )
+        text = _format_execute(r)
+        assert "status: ok" in text
+        assert "server_timing_ms: 42" in text
+        assert "PX_LAST" in text
+        assert "285.5" in text

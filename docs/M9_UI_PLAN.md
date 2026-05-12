@@ -38,9 +38,10 @@ or `client_ui_preview.py`.
 
 ![server UI mockup](screenshots/m9-server-ui-mockup.png)
 
-**macOS client UI** — `tools/blpremote-client-ui.py` (mac):
+**macOS client UI** — `tools/blpremote-client-ui.py` (mac, real
+implementation, captured 2026-05-12):
 
-![client UI mockup](screenshots/m9-client-ui-mockup.png)
+![client UI](screenshots/m9-client-ui.png)
 
 ## Tiers (preferred → fallback)
 

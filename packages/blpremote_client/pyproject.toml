@@ -29,6 +29,7 @@ dev = [
 
 [project.scripts]
 blpremote-ask = "blpremote_client.cli:main"
+blpremote-ui  = "blpremote_client.ui:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/blpremote_client"]
