@@ -64,3 +64,6 @@ users.json
 # OS files
 .DS_Store
 Thumbs.db
+build_artifacts/
+.venv-build/
+*.spec

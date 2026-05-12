@@ -1,9 +1,86 @@
-# M10 — first-run onboarding wizard
+# M10 — first-run onboarding wizard + real installer
 
-> Status: planned, not implemented. Next session picks up here.
+> Status: **partially shipped** 2026-05-12.
+> - Settings dialog in the client UI: **done** (`packages/blpremote_client/src/blpremote_client/ui.py`).
+> - macOS `.app` bundle + `.dmg` installer: **done** (`scripts/build_mac_app.sh` produces a 40 MB `.app` + 20 MB `.dmg`).
+> - Windows `.exe` installer: **specced** (`scripts/build_win_exe.ps1`); win to run on a real Windows box with Inno Setup installed.
+> - First-run pairing-code wizard: planned, not implemented.
+>
 > Driver: Krishna 2026-05-12 — "user downloads bloom-connect, picks
 > client or host, wizard handles the rest. Bloomberg is the only
-> manual prereq on the host PC."
+> manual prereq on the host PC. All env vars editable through the
+> UI, no script double-clicks, real installer with an icon."
+
+## What shipped 2026-05-12
+
+### Settings dialog (mac client)
+
+- ⚙ Settings button top-right of the main window.
+- Modal Toplevel with Server URL, Username, masked Password, masked
+  OpenRouter key fields + Save / Cancel.
+- Password + OpenRouter blank = preserve existing (so user can edit
+  URL or username without re-typing secrets).
+- `ClientController.save_settings()` writes
+  `~/.blpremote/identity.json` + `openrouter.json` chmod-600 with
+  merge semantics. 6 tests cover full-write / field-preservation /
+  trailing-slash strip / chmod / noop.
+- Live verification on next launch: refresh_identity_display()
+  re-reads files post-save, updates URL entry, identity readout,
+  OpenRouter LED, and re-evaluates Ask-button gating.
+
+This obsoletes the original "first-run wizard" idea — Settings is
+always accessible, not just first-run. The wizard becomes a thin
+helper that opens Settings automatically on first launch when
+identity.json is empty.
+
+### macOS `.app` bundle + `.dmg`
+
+`scripts/build_mac_app.sh` reproducibly builds:
+
+- `build_artifacts/dist/Bloomberg Remote.app` — 40 MB PyInstaller
+  bundle. Right `.app` shape: `Contents/MacOS/Bloomberg Remote`
+  binary, `Contents/Info.plist` with `dev.krishna.bloomconnect`
+  identifier and `Bloomberg Remote` display name.
+- `build_artifacts/Bloomberg Remote.dmg` — 20 MB drag-to-Applications
+  installer. Standard macOS distribution shape.
+
+**Why the build script matters**: a naïve `pyinstaller --windowed`
+against system Python pulled in anaconda's full site-packages
+(yt_dlp, requests, mutagen, urllib3, websockets, …) and produced
+a **2 GB** bundle. The script creates a clean `.venv-build`, installs
+only `blpremote_client[llm] + pyinstaller`, and runs PyInstaller
+from that venv. Bundle drops to 40 MB. Captured this as a comment
+in the script so future-us doesn't repeat the mistake.
+
+**Code signing**: skipped. First launch shows Gatekeeper "verifying"
+then the unidentified-developer warning. User right-clicks → Open
+to bypass; macOS remembers. Real signing needs Apple Developer ID
+($99/yr); not worth it for single-user.
+
+Running app: `docs/screenshots/m9-mac-app-running.png` — note the
+menu bar shows "Bloomberg Remote File Edit View Window Help",
+proving macOS treats it as a native app (not a Python script
+masquerading).
+
+### Windows `.exe` installer (specced, not run)
+
+`scripts/build_win_exe.ps1` mirrors the Mac script:
+
+- Clean `.venv-build` with `blpremote_server + pyinstaller`.
+- `pyinstaller --windowed --name "Bloomberg Remote Server"` →
+  `build_artifacts\dist\Bloomberg Remote Server\` bundle.
+- Inno Setup wraps it as `Bloomberg-Remote-Server-Setup.exe` with
+  Start menu + Desktop shortcuts + post-install launch option.
+- Requires Inno Setup 6 on the build box (`choco install innosetup`
+  or download from jrsoftware.org).
+- SmartScreen will warn on first launch (no EV cert); user clicks
+  "More info" → "Run anyway".
+
+Win owns the actual build (Windows toolchain on a real box with
+Bloomberg installed). The script is the spec; win adjusts paths
+or imports if PyInstaller misses any of the server-side modules.
+
+## Original onboarding plan (still relevant for the unshipped pieces)
 
 ## Goal
 
