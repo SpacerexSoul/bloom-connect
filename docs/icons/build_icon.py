@@ -1,24 +1,22 @@
 """Build the bloom-connect app icon.
 
-Design rationale:
-- The defining UI element across both server and client is the
-  status LED ("● Connected" / "● Disconnected"). The icon picks up
-  that motif: a single solid LED dot on a dark rounded-square
-  background. Self-referential and instantly tells someone "this
-  is an app about connection status".
-- Charcoal background (#1f2328) matches the macOS dark-mode menu
-  bar tint and reads cleanly in both light + dark Dock.
-- LED uses the same green (#2ea043) as the "happy / Connected"
-  state from LED_COLOUR in blpremote_client.ui — visual consistency
-  between the icon and the running UI.
-- No letterforms, no Bloomberg-orange (that's a trademark concern),
-  no chart line cliché. The dot speaks for itself.
+Design (v2):
+- Charcoal squircle background (#1f2328, GitHub Primer dark — reads
+  cleanly in both light + dark Dock).
+- "Bc" monogram, set tight, lowercase c — the brand initials.
+- White B + green c (#2ea043, matches LED_COLOUR['happy'] in the
+  UI). The c carries the live-connection accent that the v1 dead
+  LED dot used to carry; now it's part of the letterform rather
+  than floating beside it.
+- Bold sans (Helvetica Neue Bold from the system) — heavy weight
+  reads at 16×16 in Finder list view; lighter weights muddy.
+- No Bloomberg orange (trademark hazard, krishna's hard rule).
 
 Output:
-- icon_1024.png, icon_512.png, icon_256.png, icon_128.png,
-  icon_64.png, icon_32.png, icon_16.png in docs/icons/png/
-- bloom-connect.iconset/ macOS-style multi-resolution bundle
-- bloom-connect.icns produced via `iconutil` (macOS built-in)
+- icon_{16,32,64,128,256,512,1024}.png in docs/icons/png/
+- bloom-connect.iconset/ macOS multi-resolution bundle
+- bloom-connect.icns via `iconutil` (macOS built-in)
+- bloom-connect.ico via Pillow ICO writer (Windows)
 
 Run:
     python docs/icons/build_icon.py
@@ -26,48 +24,87 @@ Run:
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 HERE = Path(__file__).parent
 PNG_DIR = HERE / "png"
 ICONSET = HERE / "bloom-connect.iconset"
 ICNS = HERE / "bloom-connect.icns"
+ICO = HERE / "bloom-connect.ico"
 
-BG = (0x1f, 0x23, 0x28, 0xff)   # GitHub Primer charcoal — matches macOS dark menu bar
-LED = (0x2e, 0xa0, 0x43, 0xff)  # GitHub Primer green — matches LED_COLOUR['happy']
-LED_HIGHLIGHT = (0x5a, 0xc7, 0x70, 0xff)
+BG = (0x1f, 0x23, 0x28, 0xff)
+WHITE = (0xff, 0xff, 0xff, 0xff)
+GREEN = (0x2e, 0xa0, 0x43, 0xff)
+
+# Helvetica Neue Bold ships with macOS; index 1 is typically Bold
+# in the .ttc. Falls back to Arial Black if absent.
+FONT_CANDIDATES = [
+    ("/System/Library/Fonts/HelveticaNeue.ttc", 1),
+    ("/System/Library/Fonts/Helvetica.ttc", 1),
+    ("/System/Library/Fonts/Supplemental/Arial Black.ttf", 0),
+    ("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 0),
+]
+
+
+def _load_font(size: int) -> ImageFont.FreeTypeFont:
+    for path, idx in FONT_CANDIDATES:
+        if Path(path).exists():
+            try:
+                return ImageFont.truetype(path, size=size, index=idx)
+            except Exception:
+                continue
+    return ImageFont.load_default()
 
 
 def build(size: int) -> Image.Image:
-    """Render the icon at one size. The proportions are picked so
-    the LED reads cleanly down to 16×16 (Finder list view)."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
 
-    # Rounded-square background. macOS app icons use a "squircle"
-    # not a true rounded rect; with PIL we approximate via rounded
-    # rectangle with a corner radius ~22% of size — matches the
-    # macOS Big Sur+ icon shape closely enough.
     radius = int(size * 0.22)
     d.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=BG)
 
-    # LED dot — 50% diameter, centered. A tiny lighter highlight at
-    # the upper-left gives it the "glowing pixel" feel without being
-    # cartoonish.
-    cx, cy = size / 2, size / 2
-    r = size * 0.25
-    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=LED)
+    # Pick font size so "Bc" fills ~60% of width. Helvetica Neue Bold
+    # has B at ~0.72em wide, c at ~0.55em — total ~1.27em including a
+    # tight kerned gap. Aim for total width ≈ 0.62 × size.
+    target_width = size * 0.62
+    # Iteratively close in on the right pt size.
+    pt = int(size * 0.68)
+    for _ in range(8):
+        font = _load_font(pt)
+        bbox_b = d.textbbox((0, 0), "B", font=font)
+        bbox_c = d.textbbox((0, 0), "c", font=font)
+        w = (bbox_b[2] - bbox_b[0]) + (bbox_c[2] - bbox_c[0])
+        if w > target_width:
+            pt = int(pt * 0.95)
+        elif w < target_width * 0.92:
+            pt = int(pt * 1.04)
+        else:
+            break
 
-    # Specular highlight — small, offset toward upper-left.
-    if size >= 64:
-        hr = r * 0.32
-        hx, hy = cx - r * 0.32, cy - r * 0.32
-        d.ellipse((hx - hr, hy - hr, hx + hr, hy + hr), fill=LED_HIGHLIGHT)
+    font = _load_font(pt)
+    # Geometry: place B + c side-by-side with a tight gap. Compute the
+    # actual baseline-aware bbox so the lockup is optically centered.
+    bb = d.textbbox((0, 0), "B", font=font)
+    bc = d.textbbox((0, 0), "c", font=font)
+    bw, bh = bb[2] - bb[0], bb[3] - bb[1]
+    cw, ch = bc[2] - bc[0], bc[3] - bc[1]
+    # Kerning: tight gap, ~4% of size.
+    gap = int(size * 0.02)
+    total_w = bw + gap + cw
+    # Vertical center is the max of B's full height; align c to the
+    # baseline of B (cap-height vs x-height). Empirical offset.
+    bx = (size - total_w) // 2 - bb[0]
+    by = (size - bh) // 2 - bb[1]
+    cx = bx + bw + gap - bc[0]
+    # Align c to the baseline of B — c sits lower because lowercase.
+    cy = by + (bh - ch) - bc[1] + bb[1]
+
+    d.text((bx, by), "B", font=font, fill=WHITE)
+    d.text((cx, cy), "c", font=font, fill=GREEN)
 
     return img
 
@@ -76,7 +113,6 @@ def main() -> int:
     PNG_DIR.mkdir(parents=True, exist_ok=True)
     ICONSET.mkdir(parents=True, exist_ok=True)
 
-    # macOS iconset wants these specific filenames + sizes.
     sizes = {
         16:   ["icon_16x16.png"],
         32:   ["icon_16x16@2x.png", "icon_32x32.png"],
@@ -89,32 +125,25 @@ def main() -> int:
 
     for size, names in sizes.items():
         img = build(size)
-        # also save plain PNGs for repo/docs use
         plain = PNG_DIR / f"icon_{size}.png"
         img.save(plain, "PNG")
         for name in names:
             img.save(ICONSET / name, "PNG")
-        print(f"  built {size}×{size} ({len(names)} iconset variant{'s' if len(names) > 1 else ''})")
+        print(f"  built {size}×{size}")
 
-    # Windows .ico — multi-resolution single file. Pillow handles
-    # this in one save call; same source PNGs, no extra tooling.
-    ico_path = HERE / "bloom-connect.ico"
+    # Windows .ico — multi-resolution, single file.
     ico_base = build(256)
     ico_base.save(
-        ico_path,
+        ICO,
         format="ICO",
         sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
-    print(f"  wrote {ico_path.name} ({ico_path.stat().st_size} bytes)")
+    print(f"  wrote {ICO.name} ({ICO.stat().st_size} bytes)")
 
-    print(f"\nrunning iconutil → {ICNS.name}")
     if sys.platform != "darwin":
-        print("  not on macOS; skipping .icns conversion. PNGs are in docs/icons/png/.")
+        print("  not on macOS; skipping .icns conversion.")
         return 0
-    subprocess.run(
-        ["iconutil", "-c", "icns", "-o", str(ICNS), str(ICONSET)],
-        check=True,
-    )
+    subprocess.run(["iconutil", "-c", "icns", "-o", str(ICNS), str(ICONSET)], check=True)
     print(f"  wrote {ICNS.name} ({ICNS.stat().st_size} bytes)")
     return 0
 
