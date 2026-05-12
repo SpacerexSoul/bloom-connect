@@ -67,3 +67,4 @@ Thumbs.db
 build_artifacts/
 .venv-build/
 *.spec
+docs/icons/bloom-connect.iconset/

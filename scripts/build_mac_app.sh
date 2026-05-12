@@ -40,9 +40,18 @@ step 2 "bundling .app via PyInstaller"
 rm -rf build_artifacts
 mkdir -p build_artifacts
 cd build_artifacts
+ICON_FLAG=()
+ICON_PATH="../docs/icons/bloom-connect.icns"
+if [ -f "$ICON_PATH" ]; then
+    ICON_FLAG=(--icon "$ICON_PATH")
+else
+    echo "  (no icon at $ICON_PATH — run 'python docs/icons/build_icon.py' first)"
+fi
+
 ../.venv-build/bin/pyinstaller --noconfirm --windowed \
     --name "Bloomberg Remote" \
     --osx-bundle-identifier dev.krishna.bloomconnect \
+    "${ICON_FLAG[@]}" \
     --hidden-import blpremote_client.ui \
     --hidden-import blpremote_client.host \
     --hidden-import blpremote_client.llm \
