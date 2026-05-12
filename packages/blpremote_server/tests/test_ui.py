@@ -18,13 +18,18 @@ from blpremote_server.ui import (
     build_send_url_command,
     build_start_command,
     build_stop_command,
+    count_users,
+    create_user_inline,
     detect_bloomberg,
+    is_first_run,
     ngrok_authtoken_status,
     parse_health,
     probe_jwt,
     read_ngrok_url,
     read_pairing_code,
     regenerate_jwt_secret,
+    reset_install_state,
+    set_ngrok_authtoken_inline,
     start_button_state,
 )
 
@@ -274,3 +279,141 @@ class TestNgrokAuthtokenStatus:
         p = tmp_path / "ngrok.yml"
         p.write_text("tunnels:\n  some_authtoken_id: x\n", encoding="utf-8")
         assert ngrok_authtoken_status(p) == ("unhappy", "Missing")
+
+
+# 9. M10.5 first-run + reset helpers.
+class TestCountUsers:
+    def test_missing_file(self, tmp_path):
+        assert count_users(tmp_path / "nope.json") == 0
+
+    def test_empty_dict(self, tmp_path):
+        p = tmp_path / "users.json"
+        p.write_text("{}", encoding="utf-8")
+        assert count_users(p) == 0
+
+    def test_one_user(self, tmp_path):
+        p = tmp_path / "users.json"
+        p.write_text('{"alice": {"username": "alice", "password_hash": "x"}}', encoding="utf-8")
+        assert count_users(p) == 1
+
+    def test_unparseable_treated_as_zero(self, tmp_path):
+        p = tmp_path / "users.json"
+        p.write_text("{ not json", encoding="utf-8")
+        assert count_users(p) == 0
+
+    def test_non_dict_treated_as_zero(self, tmp_path):
+        # If users.json somehow held a list (data drift), don't crash.
+        p = tmp_path / "users.json"
+        p.write_text("[]", encoding="utf-8")
+        assert count_users(p) == 0
+
+
+class TestIsFirstRun:
+    def _stub_ngrok(self, tmp_path, configured: bool):
+        p = tmp_path / "ngrok.yml"
+        if configured:
+            p.write_text("authtoken: abc\n", encoding="utf-8")
+        return p
+
+    def test_all_three_present_returns_false(self, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("S")
+        users = tmp_path / "users.json"
+        users.write_text('{"u": {}}')
+        ngrok = self._stub_ngrok(tmp_path, configured=True)
+        assert is_first_run(secret, users, ngrok) is False
+
+    def test_missing_secret(self, tmp_path):
+        users = tmp_path / "users.json"
+        users.write_text('{"u": {}}')
+        ngrok = self._stub_ngrok(tmp_path, configured=True)
+        assert is_first_run(tmp_path / "no-secret.txt", users, ngrok) is True
+
+    def test_no_users(self, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("S")
+        ngrok = self._stub_ngrok(tmp_path, configured=True)
+        assert is_first_run(secret, tmp_path / "no-users.json", ngrok) is True
+
+    def test_no_authtoken(self, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("S")
+        users = tmp_path / "users.json"
+        users.write_text('{"u": {}}')
+        assert is_first_run(secret, users, tmp_path / "no-ngrok.yml") is True
+
+
+class TestCreateUserInline:
+    def test_creates_then_returns_true_then_false_on_dup(self, tmp_path):
+        users = tmp_path / "users.json"
+        assert create_user_inline(users, "alice", "pw") is True
+        # Same name -> create_user_inline returns False per UserStore contract.
+        assert create_user_inline(users, "alice", "pw2") is False
+        # Different name -> True.
+        assert create_user_inline(users, "bob", "pw3") is True
+
+    def test_password_is_bcrypt_hashed_not_plaintext(self, tmp_path):
+        # Belt-and-braces: the file must NOT contain the plaintext.
+        users = tmp_path / "users.json"
+        create_user_inline(users, "alice", "supersecret-12345")
+        body = users.read_text(encoding="utf-8")
+        assert "supersecret-12345" not in body
+        assert "password_hash" in body
+        assert body.count("$2b$") >= 1  # bcrypt prefix
+
+
+class TestSetNgrokAuthtokenInline:
+    def test_no_exe_returns_false(self):
+        ok, msg = set_ngrok_authtoken_inline(None, "anything")
+        assert ok is False
+        assert "ngrok.exe not found" in msg
+
+    def test_blank_token_returns_false(self, tmp_path):
+        # Pretend we have an exe (path just needs to exist).
+        fake_exe = tmp_path / "ngrok.exe"
+        fake_exe.write_text("")
+        ok, msg = set_ngrok_authtoken_inline(fake_exe, "   ")
+        assert ok is False
+        assert "empty" in msg.lower()
+
+
+class TestResetInstallState:
+    def test_nothing_to_back_up_returns_none(self, tmp_path):
+        # All three target files absent -> no backup dir created.
+        assert reset_install_state(
+            secret_file=tmp_path / "no-secret.txt",
+            users_json_path=tmp_path / "no-users.json",
+            pairing_code_file=tmp_path / "no-pair.txt",
+            backup_root=tmp_path / "backup-root",
+        ) is None
+        assert not (tmp_path / "backup-root").exists()
+
+    def test_moves_existing_files_to_timestamped_backup(self, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("S")
+        users = tmp_path / "users.json"
+        users.write_text('{"alice": {}}')
+        pair = tmp_path / "pair.txt"
+        pair.write_text("CODE")
+        backup_root = tmp_path / "backup-root"
+
+        backup = reset_install_state(secret, users, pair, backup_root)
+        assert backup is not None
+        assert backup.parent == backup_root
+        assert backup.name.startswith("backup-")
+        # Original files gone, backup copies present.
+        assert not secret.exists() and (backup / "secret.txt").read_text() == "S"
+        assert not users.exists() and (backup / "users.json").read_text() == '{"alice": {}}'
+        assert not pair.exists() and (backup / "pair.txt").read_text() == "CODE"
+
+    def test_partial_state_only_backs_up_what_exists(self, tmp_path):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("S")
+        # users + pair absent on purpose.
+        backup = reset_install_state(
+            secret, tmp_path / "u.json", tmp_path / "p.txt", tmp_path / "br"
+        )
+        assert backup is not None
+        assert (backup / "secret.txt").exists()
+        assert not (backup / "u.json").exists()
+        assert not (backup / "p.txt").exists()
