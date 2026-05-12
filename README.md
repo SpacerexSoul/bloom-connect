@@ -73,45 +73,46 @@ that ask for it. Research, learning, prototyping — that's the scope.
 
 ## Quick start
 
+> **Two install tracks per OS.** The bundled `.app` / `.exe` is the
+> nicest user experience but doesn't survive on machines running
+> corporate EDR (SentinelOne, CrowdStrike, etc.) without code
+> signing. The `setup.ps1` / `setup.sh` path is AV-tolerant —
+> uses the system Python, normal pip installs, normal `.bat`
+> launchers — and is the right pick for university trading-floor
+> PCs and other locked-down environments. **Pick the one your
+> environment actually allows; both produce the same running app.**
+
 ### macOS client
 
-1. Download `Bloomberg Remote.dmg` from the latest release (or build it
-   yourself: `./scripts/build_mac_app.sh`).
-2. Open the `.dmg`, drag **Bloomberg Remote** to **Applications**, eject.
-3. Open it from Applications. Right-click → Open the first time to bypass
-   the unsigned-developer Gatekeeper warning (we're not paying for an
-   Apple Developer ID for a personal tool).
-4. The Settings dialog auto-opens on first launch. Paste a **pairing code**
-   from the host (or fill in URL / username / password manually), Save.
-5. Click **Connect** — green LED, you're talking to Bloomberg.
+| Track | When to use | Steps |
+|---|---|---|
+| **Bundled `.app` (preferred)** | Personal / home macOS, no MDM, ok with Gatekeeper warning on first launch | Open `Bloomberg Remote.dmg`, drag to **Applications**, eject. Right-click → Open the first time (unsigned bypass), then double-click like any normal app. |
+| **`setup.sh` (EDR-friendly)** | Managed Mac, or you prefer working from source | `git clone … && cd bloom-connect && ./setup.sh` — sets up `.venv`, installs the client, bootstraps `~/.blpremote/`, drops `Connect.command` on your Desktop. |
 
-CLI alternative if you'd rather skip the bundle:
+First launch (either track): the Settings dialog auto-opens. Paste a
+**pairing code** from the host (or fill URL / username / password manually
++ optional OpenRouter key), Save. Click **Connect** — green LED, you're
+talking to Bloomberg.
 
-```bash
-git clone <this repo> && cd bloom-connect
-./setup.sh             # finds python, venv, installs the client + deps
-                       # bootstraps ~/.blpremote/, prompts for OpenRouter key,
-                       # drops Connect.command on your Desktop
-```
+Build the `.app` + `.dmg` yourself: `./scripts/build_mac_app.sh`.
 
 ### Windows server
 
-Prereq: Bloomberg Terminal installed and logged in. That's the only thing
+Prereq: Bloomberg Terminal installed and logged in. The only thing
 you have to install by hand.
 
-```powershell
-git clone <this repo> ; cd bloom-connect
-.\setup.ps1 -CoordSend mac
-```
+| Track | When to use | Steps |
+|---|---|---|
+| **`setup.ps1` (recommended)** | Anywhere — including university / corporate machines running EDR | `git clone …; cd bloom-connect; .\setup.ps1 -CoordSend mac`. Finds Python (skips the MS Store alias trap), creates venv, installs `blpapi` + server, starts uvicorn + ngrok, posts the public URL to your Mac via the coord channel. |
+| **`.exe` installer (personal / home)** | Home PC, no EDR. Wraps the same stack in a real installer with Start Menu shortcut + icon. | Download `Bloomberg-Remote-Server-Setup.exe`, run, double-click the new Start Menu entry. **Won't work behind SentinelOne / CrowdStrike / MDM-managed Defender** — those EDRs block unsigned PyInstaller bundles. |
 
-`setup.ps1` finds Python, creates a venv, installs `blpapi` + the server
-package, starts uvicorn, starts ngrok, waits for `/health`, and posts the
-public ngrok URL to your Mac via the coord channel. Pass `-Force` to
-restart even when healthy; `-NoNgrok` for LAN-only deployment.
+Optional Server UI either way: double-click `START_SERVER_UI.bat`.
+Tkinter window shows status LEDs, ngrok URL with Copy button,
+Start/Stop/Send-URL buttons, scrolled logs.
 
-Optional Server UI: double-click `START_SERVER_UI.bat` — Tkinter window
-shows status LEDs, ngrok URL with Copy button, Start/Stop/Send-URL
-buttons, scrolled logs.
+Build the `.exe` yourself: `.\scripts\build_win_exe.ps1` (requires
+`choco install innosetup` for the installer wrap; the bundle dir
+builds without it).
 
 ---
 
@@ -225,6 +226,26 @@ Requires `choco install innosetup` on the build box.
 ---
 
 ## Common questions
+
+<details>
+<summary><b>The <code>.exe</code> installer launched and immediately closed. What happened?</b></summary>
+
+Almost certainly your corporate / university EDR (SentinelOne,
+CrowdStrike, MDM-managed Defender). Unsigned PyInstaller bundles
+trip behavioural detection on those products and get killed silently
+before the Tk window paints.
+
+Two fixes:
+1. **Use `setup.ps1` instead** — the AV-tolerant track. Same stack
+   underneath, no PyInstaller-wrapped binary, gets along with EDR.
+2. **Get an exclusion** from your IT team. Often a pain to obtain
+   for personal-use software; usually faster to just take track 1.
+
+Code signing (EV cert, ~$200/yr) is the only general fix; deferred
+until distribution outside the original two-box setup becomes a
+real need.
+
+</details>
 
 <details>
 <summary><b>Why ngrok, not just open a firewall port?</b></summary>
