@@ -1,6 +1,6 @@
 # Trading Strategies
 
-This directory contains proprietary trading strategies that use the Bloomberg Remote BLPAPI Wrapper.
+This directory contains test trading strategies that use the Bloomberg Remote BLPAPI Wrapper.
 
 ## Strategy 1: Algebraic Topology Market-Neutral Strategy
 
